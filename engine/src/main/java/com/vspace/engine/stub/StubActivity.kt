@@ -365,40 +365,72 @@ open class StubActivity : Activity() {
     }
 
     // ── Lifecycle delegation ────────────────────────────────────────
+    // Activity lifecycle methods are protected, must use reflection to call
+    // them on the target activity instance.
 
     override fun onStart() {
         super.onStart()
-        try { targetActivity?.onStart() } catch (_: Exception) {}
+        try {
+            val m = Activity::class.java.getDeclaredMethod("onStart")
+            m.isAccessible = true
+            m.invoke(targetActivity)
+        } catch (_: Exception) {}
     }
 
     override fun onResume() {
         super.onResume()
-        try { targetActivity?.onResume() } catch (_: Exception) {}
+        try {
+            val m = Activity::class.java.getDeclaredMethod("onResume")
+            m.isAccessible = true
+            m.invoke(targetActivity)
+        } catch (_: Exception) {}
     }
 
     override fun onPause() {
         super.onPause()
-        try { targetActivity?.onPause() } catch (_: Exception) {}
+        try {
+            val m = Activity::class.java.getDeclaredMethod("onPause")
+            m.isAccessible = true
+            m.invoke(targetActivity)
+        } catch (_: Exception) {}
     }
 
     override fun onStop() {
         super.onStop()
-        try { targetActivity?.onStop() } catch (_: Exception) {}
+        try {
+            val m = Activity::class.java.getDeclaredMethod("onStop")
+            m.isAccessible = true
+            m.invoke(targetActivity)
+        } catch (_: Exception) {}
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        try { targetActivity?.onDestroy() } catch (_: Exception) {}
+        try {
+            val m = Activity::class.java.getDeclaredMethod("onDestroy")
+            m.isAccessible = true
+            m.invoke(targetActivity)
+        } catch (_: Exception) {}
     }
 
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
-        try { targetActivity?.onNewIntent(intent) } catch (_: Exception) {}
+        try {
+            val m = Activity::class.java.getDeclaredMethod("onNewIntent", Intent::class.java)
+            m.isAccessible = true
+            m.invoke(targetActivity, intent)
+        } catch (_: Exception) {}
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        try { targetActivity?.onActivityResult(requestCode, resultCode, data) } catch (_: Exception) {}
+        try {
+            val m = Activity::class.java.getDeclaredMethod(
+                "onActivityResult", Int::class.java, Int::class.java, Intent::class.java
+            )
+            m.isAccessible = true
+            m.invoke(targetActivity, requestCode, resultCode, data)
+        } catch (_: Exception) {}
     }
 
     override fun onRequestPermissionsResult(
@@ -407,6 +439,15 @@ open class StubActivity : Activity() {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        try { targetActivity?.onRequestPermissionsResult(requestCode, permissions, grantResults) } catch (_: Exception) {}
+        try {
+            val m = Activity::class.java.getDeclaredMethod(
+                "onRequestPermissionsResult",
+                Int::class.java,
+                Array<String>::class.java,
+                IntArray::class.java
+            )
+            m.isAccessible = true
+            m.invoke(targetActivity, requestCode, permissions, grantResults)
+        } catch (_: Exception) {}
     }
 }
