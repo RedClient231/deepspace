@@ -8,6 +8,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.ImageView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
@@ -49,7 +50,11 @@ class LauncherActivity : AppCompatActivity() {
     }
 
     private fun setupRecyclerView() {
-        adapter = AppListAdapter(apps) { app -> showAppOptions(app) }
+        adapter = AppListAdapter(
+            apps,
+            onClick = { app -> launchApp(app) },
+            onLongClick = { app -> showAppOptions(app) }
+        )
         binding.recyclerView.layoutManager = GridLayoutManager(this, 4)
         binding.recyclerView.adapter = adapter
     }
@@ -86,8 +91,15 @@ class LauncherActivity : AppCompatActivity() {
     }
 
     private fun launchApp(app: VirtualAppInfo) {
-        lifecycleScope.launch(Dispatchers.IO) {
-            VirtualCore.get().launchApp(this@LauncherActivity, app.packageName)
+        Toast.makeText(this, "Launching ${app.name}...", Toast.LENGTH_SHORT).show()
+        // MUST launch on main thread — startActivity requires it
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                VirtualCore.get().launchApp(this@LauncherActivity, app.packageName)
+            }
+            if (!result) {
+                Toast.makeText(this@LauncherActivity, "Failed to launch ${app.name}", Toast.LENGTH_LONG).show()
+            }
         }
     }
 
@@ -123,6 +135,7 @@ class LauncherActivity : AppCompatActivity() {
 
     class AppListAdapter(
         private val apps: List<VirtualAppInfo>,
+        private val onClick: (VirtualAppInfo) -> Unit,
         private val onLongClick: (VirtualAppInfo) -> Unit
     ) : RecyclerView.Adapter<AppListAdapter.ViewHolder>() {
 
@@ -145,13 +158,8 @@ class LauncherActivity : AppCompatActivity() {
             } else {
                 holder.icon.setImageResource(R.drawable.ic_default_app)
             }
-            holder.itemView.setOnClickListener {
-                onLongClick(app)
-            }
-            holder.itemView.setOnLongClickListener {
-                onLongClick(app)
-                true
-            }
+            holder.itemView.setOnClickListener { onClick(app) }
+            holder.itemView.setOnLongClickListener { onLongClick(app); true }
         }
 
         override fun getItemCount() = apps.size
