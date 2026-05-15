@@ -2,25 +2,29 @@ package com.vspace.engine.stub
 
 import android.app.Activity
 import android.app.Application
+import android.app.Instrumentation
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
+import android.content.pm.ActivityInfo
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.content.res.AssetManager
 import android.content.res.Resources
 import android.os.Build
 import android.os.Bundle
+import android.os.IBinder
 import android.util.Log
-import com.vspace.engine.pm.LaunchConfig
 import dalvik.system.DexClassLoader
 import java.io.File
+import java.lang.reflect.Method
 
 /**
  * Proxy activity that hosts imported APK activities.
  *
- * Instead of trying to startActivity() a target class (which Android won't allow
- * since the target isn't an installed package), StubActivity IS the real Android
- * Activity. It loads the target Activity class reflectively and delegates
- * lifecycle calls to it.
+ * StubActivity IS the real Android Activity registered in the host manifest.
+ * It loads the target Activity class reflectively, wires it up via Activity.attach(),
+ * and delegates lifecycle calls to it.
  *
  * Config is passed via intent extras (primary), falling back to LaunchConfig file.
  */
@@ -37,7 +41,7 @@ open class StubActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // 1. Read from intent extras first
+        // 1. Read from intent extras
         val targetPkg = intent.getStringExtra("target_pkg")
         val apkPath = intent.getStringExtra("target_apk")
         val dataDir = intent.getStringExtra("target_data")
@@ -49,7 +53,7 @@ open class StubActivity : Activity() {
         }
 
         try {
-            // 2. Load the APK Dex
+            // 2. Create ClassLoader for the target APK
             val nativeLibDir = computeNativeLibDir(dataDir)
             val classLoader = DexClassLoader(
                 apkPath,
@@ -73,30 +77,118 @@ open class StubActivity : Activity() {
             addAssetPath.invoke(assetManager, apkPath)
             targetResources = Resources(assetManager, resources.displayMetrics, resources.configuration)
 
-            // 5. Proxy: instantiate the target activity and delegate
-            val targetActivityClass = classLoader.loadClass(launcherActivityName)
-            val target = targetActivityClass.newInstance() as Activity
+            // 5. Instantiate the target Activity
+            val targetClass = classLoader.loadClass(launcherActivityName)
+            val target = targetClass.newInstance() as Activity
             targetActivity = target
 
-            // Inject context via ContextWrapper.attachBaseContext
-            val attachMethod = Context::class.java.getDeclaredMethod(
-                "attachBaseContext", Context::class.java
-            )
-            attachMethod.isAccessible = true
-            attachMethod.invoke(target, this)
+            // 6. Wire up the target Activity properly via Activity.attach()
+            wireUpTargetActivity(target, targetPkg, apkPath, classLoader)
 
-            // Call onCreate of the target
-            val onCreateMethod = Activity::class.java.getDeclaredMethod(
-                "onCreate", Bundle::class.java
-            )
+            // 7. Call target.onCreate()
+            val onCreateMethod = Activity::class.java.getDeclaredMethod("onCreate", Bundle::class.java)
             onCreateMethod.isAccessible = true
             onCreateMethod.invoke(target, savedInstanceState)
 
-            Log.i(TAG, "Successfully proxied to $launcherActivityName from $targetPkg")
+            Log.i(TAG, "Successfully proxied $launcherActivityName from $targetPkg")
 
         } catch (e: Exception) {
             Log.e(TAG, "Failed to proxy target app", e)
             finish()
+        }
+    }
+
+    /**
+     * Wire up the target Activity so it can inflate layouts, show windows, etc.
+     * Calls Activity.attach() via reflection with all required parameters.
+     */
+    private fun wireUpTargetActivity(target: Activity, pkg: String, apkPath: String, classLoader: ClassLoader) {
+        // Step A: Get ActivityThread instance
+        val activityThreadClass = Class.forName("android.app.ActivityThread")
+        val currentAT = activityThreadClass.getMethod("currentActivityThread").invoke(null)
+
+        // Step B: Get Instrumentation from ActivityThread
+        val instrField = activityThreadClass.getDeclaredField("mInstrumentation")
+        instrField.isAccessible = true
+        val instrumentation = instrField.get(currentAT) as Instrumentation
+
+        // Step C: Get our token (the IBinder from ActivityTaskManager)
+        val tokenField = Activity::class.java.getDeclaredField("mToken")
+        tokenField.isAccessible = true
+        val token = tokenField.get(this) as? IBinder
+
+        // Step D: Build ActivityInfo for the target
+        val appInfo = ApplicationInfo().apply {
+            packageName = pkg
+            sourceDir = apkPath
+            publicSourceDir = apkPath
+            nativeLibraryDir = computeNativeLibDir(dataDir = intent.getStringExtra("target_data"))
+        }
+        val activityInfo = ActivityInfo().apply {
+            packageName = pkg
+            name = target.javaClass.name
+            applicationInfo = appInfo
+        }
+
+        // Step E: Call Activity.attach()
+        // Signature: attach(Context, ActivityThread, Instrumentation, IBinder, int, Application, Intent, ActivityInfo, CharSequence, Activity, String, ...)
+        val attachMethod = findActivityAttachMethod()
+        if (attachMethod != null) {
+            attachMethod.isAccessible = true
+            val params = attachMethod.parameterTypes
+            val args = arrayOfNulls<Any>(params.size)
+
+            for (i in params.indices) {
+                when {
+                    params[i] == Context::class.java -> args[i] = this
+                    params[i].name == "android.app.ActivityThread" -> args[i] = currentAT
+                    params[i] == Instrumentation::class.java -> args[i] = instrumentation
+                    params[i] == IBinder::class.java -> args[i] = token
+                    params[i] == Int::class.java || params[i] == Int::class.javaPrimitiveType -> args[i] = 0
+                    params[i] == Application::class.java -> args[i] = application
+                    params[i] == Intent::class.java -> args[i] = Intent().apply {
+                        setClassName(this@StubActivity, target.javaClass.name)
+                    }
+                    params[i] == ActivityInfo::class.java -> args[i] = activityInfo
+                    params[i] == CharSequence::class.java -> args[i] = pkg
+                    params[i] == Activity::class.java -> args[i] = this
+                    params[i] == String::class.java -> args[i] = null // id
+                    params[i] == android.content.res.Configuration::class.java -> args[i] = resources.configuration
+                    // NonConfigurationInstances
+                    params[i].name.contains("NonConfigurationInstances") -> args[i] = null
+                }
+            }
+            attachMethod.invoke(target, *args)
+            Log.d(TAG, "Activity.attach() succeeded")
+        } else {
+            // Fallback: manually set critical fields
+            Log.w(TAG, "Activity.attach() not found, using field injection")
+            setField(target, "mApplication", application)
+            setField(target, "mToken", token)
+            setField(target, "mInstrumentation", instrumentation)
+
+            // Set up window manager
+            val wm = getSystemService(Context.WINDOW_SERVICE)
+            setField(target, "mWindowManager", wm)
+        }
+    }
+
+    private fun findActivityAttachMethod(): Method? {
+        for (m in Activity::class.java.declaredMethods) {
+            if (m.name == "attach" && m.parameterTypes.size >= 8) {
+                return m
+            }
+        }
+        return null
+    }
+
+    private fun setField(obj: Any, fieldName: String, value: Any?) {
+        try {
+            val field = obj.javaClass.getDeclaredField(fieldName)
+            field.isAccessible = true
+            field.set(obj, value)
+        } catch (e: Exception) {
+            Log.d(TAG, "Could not set $fieldName: ${e.message}")
         }
     }
 
@@ -125,7 +217,6 @@ open class StubActivity : Activity() {
         val libDir = File(dataDir, "lib")
         if (!libDir.exists()) return null
 
-        // Check for ABI subdirectories first
         for (abi in Build.SUPPORTED_ABIS) {
             val abiDir = File(libDir, abi)
             if (abiDir.exists() && abiDir.listFiles()?.isNotEmpty() == true) {
@@ -133,7 +224,6 @@ open class StubActivity : Activity() {
             }
         }
 
-        // Check if .so files are directly in lib/
         val directLibs = libDir.listFiles { f -> f.name.endsWith(".so") }
         if (directLibs?.isNotEmpty() == true) {
             return libDir.absolutePath
