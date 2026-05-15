@@ -40,7 +40,10 @@ class AMSHook : InvocationHandler {
     private fun handleStartActivity(method: Method, args: Array<out Any?>?): Any? {
         Log.d(TAG, "Intercepting startActivity")
         if (args != null && args.isNotEmpty()) {
-            val newArgs: Array<Any?> = args.copyOf()
+            val newArgs = arrayOfNulls<Any>(args.size)
+            for (i in args.indices) {
+                newArgs[i] = args[i]
+            }
             for (i in newArgs.indices) {
                 val arg = newArgs[i]
                 if (arg is Intent) {

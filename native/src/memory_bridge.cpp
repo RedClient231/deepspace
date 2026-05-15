@@ -11,11 +11,36 @@
 #include <fcntl.h>
 #include <sys/uio.h>
 #include <errno.h>
+#include <sys/syscall.h>
 
 #define TAG "memory_bridge"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
+
+// process_vm_readv/writev may not be available in NDK for API < 23
+// Use syscall directly
+#if !defined(__NR_process_vm_readv)
+  #if defined(__aarch64__) || defined(__x86_64__)
+    #define __NR_process_vm_readv 270
+    #define __NR_process_vm_writev 271
+  #elif defined(__arm__) || defined(__i386__)
+    #define __NR_process_vm_readv 376
+    #define __NR_process_vm_writev 377
+  #endif
+#endif
+
+static ssize_t process_vm_readv_compat(pid_t pid, const struct iovec *local_iov,
+                                        unsigned long liovcnt, const struct iovec *remote_iov,
+                                        unsigned long riovcnt, unsigned long flags) {
+    return syscall(__NR_process_vm_readv, pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
+}
+
+static ssize_t process_vm_writev_compat(pid_t pid, const struct iovec *local_iov,
+                                         unsigned long liovcnt, const struct iovec *remote_iov,
+                                         unsigned long riovcnt, unsigned long flags) {
+    return syscall(__NR_process_vm_writev, pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
+}
 
 // ── State ──────────────────────────────────────────────────────────
 
@@ -159,14 +184,10 @@ bool memory_bridge_is_connected() {
 
 // ── Direct process_vm_readv/writev (used by daemon) ────────────────
 
-/**
- * Direct memory read using process_vm_readv.
- * Only works when caller and target share the same UID.
- */
 int direct_read_memory(int pid, uint64_t addr, void* buf, size_t len) {
     struct iovec local_iov = { .iov_base = buf, .iov_len = len };
-    struct iovec remote_iov = { .iov_base = (void*)addr, .iov_len = len };
-    ssize_t n = process_vm_readv(pid, &local_iov, 1, &remote_iov, 1, 0);
+    struct iovec remote_iov = { .iov_base = (void*)(uintptr_t)addr, .iov_len = len };
+    ssize_t n = process_vm_readv_compat(pid, &local_iov, 1, &remote_iov, 1, 0);
     if (n < 0) {
         LOGE("process_vm_readv failed: pid=%d addr=0x%lx err=%s",
              pid, (unsigned long)addr, strerror(errno));
@@ -175,14 +196,10 @@ int direct_read_memory(int pid, uint64_t addr, void* buf, size_t len) {
     return (int)n;
 }
 
-/**
- * Direct memory write using process_vm_writev.
- * Only works when caller and target share the same UID.
- */
 int direct_write_memory(int pid, uint64_t addr, const void* buf, size_t len) {
     struct iovec local_iov = { .iov_base = (void*)buf, .iov_len = len };
-    struct iovec remote_iov = { .iov_base = (void*)addr, .iov_len = len };
-    ssize_t n = process_vm_writev(pid, &local_iov, 1, &remote_iov, 1, 0);
+    struct iovec remote_iov = { .iov_base = (void*)(uintptr_t)addr, .iov_len = len };
+    ssize_t n = process_vm_writev_compat(pid, &local_iov, 1, &remote_iov, 1, 0);
     if (n < 0) {
         LOGE("process_vm_writev failed: pid=%d addr=0x%lx err=%s",
              pid, (unsigned long)addr, strerror(errno));
