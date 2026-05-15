@@ -3,11 +3,13 @@
 #include <unistd.h>
 #include <cstring>
 #include <cstdlib>
+#include <sys/stat.h>
 
 #define TAG "su_stub"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
 // ── Fake su Implementation ─────────────────────────────────────────
 // GameGuardian tries to execute "su" to get root access.

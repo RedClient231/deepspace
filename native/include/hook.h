@@ -3,6 +3,8 @@
 #include <jni.h>
 #include <string>
 #include <vector>
+#include <cstdio>
+#include <sys/types.h>
 
 // ── Hook Registration ───────────────────────────────────────────────
 
@@ -23,6 +25,16 @@ int hook_refresh();
  */
 int hook_register(const char* regex_lib, const char* func_name,
                   void* hook_func, void** orig_func);
+
+// ── Hooked Function Declarations ────────────────────────────────────
+
+int hook_open(const char* pathname, int flags, ...);
+int hook_openat(int dirfd, const char* pathname, int flags, ...);
+FILE* hook_fopen(const char* pathname, const char* mode);
+int hook_stat(const char* pathname, struct stat* buf);
+int hook_access(const char* pathname, int mode);
+long hook_ptrace(int request, pid_t pid, void* addr, void* data);
+int hook_execve(const char* filename, char* const argv[], char* const envp[]);
 
 // ── IO Redirection ─────────────────────────────────────────────────
 

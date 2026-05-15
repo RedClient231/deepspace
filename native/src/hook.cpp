@@ -1,11 +1,14 @@
 #include "hook.h"
+#include "io_redirect.h"
+#include "memory_bridge.h"
 #include <android/log.h>
 #include <dlfcn.h>
 #include <cstring>
 #include <unordered_map>
 #include <mutex>
 #include <string>
-#include <regex>
+#include <sys/ptrace.h>
+#include <sys/stat.h>
 
 #define TAG "vhook"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -169,6 +172,3 @@ int hook_execve(const char* filename, char* const argv[], char* const envp[]) {
     if (orig_execve) return orig_execve(filename, argv, envp);
     return -1;
 }
-
-#include <sys/ptrace.h>
-#include <sys/stat.h>
