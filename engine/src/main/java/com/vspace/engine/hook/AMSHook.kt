@@ -36,23 +36,25 @@ class AMSHook : InvocationHandler {
         }
     }
 
-    private fun handleStartActivity(method: Method, args: Array<Any?>?): Any? {
+    private fun handleStartActivity(method: Method, args: Array<out Any?>?): Any? {
         Log.d(TAG, "Intercepting startActivity")
         // Replace intent target with stub activity
         if (args != null && args.isNotEmpty()) {
-            for (i in args.indices) {
-                val arg = args[i]
+            val mutableArgs = args.copyOf()
+            for (i in mutableArgs.indices) {
+                val arg = mutableArgs[i]
                 if (arg is android.content.Intent) {
                     val originalIntent = arg
                     val targetPkg = originalIntent.component?.packageName
                     if (targetPkg != null && isVirtualApp(targetPkg)) {
                         // Redirect through stub
                         val stubIntent = createStubIntent(originalIntent)
-                        args[i] = stubIntent
+                        mutableArgs[i] = stubIntent
                         Log.d(TAG, "Redirected $targetPkg through stub")
                     }
                 }
             }
+            return method.invoke(null, *mutableArgs)
         }
         return method.invoke(null, *(args ?: emptyArray()))
     }
@@ -87,7 +89,7 @@ class AMSHook : InvocationHandler {
         return android.content.Intent().apply {
             setClassName(
                 "com.vspace.stub$stubIndex",
-                "com.vspace.stub.StubActivity"
+                "com.vspace.stub.StubActivity$stubIndex"
             )
             putExtra("original_intent", original)
             addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)

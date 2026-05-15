@@ -6,17 +6,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Source files
 add_library(vengine SHARED
-    native/src/main.cpp
-    native/src/hook.cpp
-    native/src/io_redirect.cpp
-    native/src/proc_virtual.cpp
-    native/src/memory_bridge.cpp
-    native/src/su_stub.cpp
+    src/main.cpp
+    src/hook.cpp
+    src/io_redirect.cpp
+    src/proc_virtual.cpp
+    src/memory_bridge.cpp
+    src/su_stub.cpp
 )
 
 # Include directories
 target_include_directories(vengine PRIVATE
-    native/include
+    include
 )
 
 # Link libraries
