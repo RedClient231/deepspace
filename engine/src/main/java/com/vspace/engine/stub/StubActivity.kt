@@ -18,18 +18,18 @@ import android.os.IBinder
 import android.util.Log
 import dalvik.system.DexClassLoader
 import java.io.File
-import java.lang.reflect.Method
+import java.lang.reflect.InvocationTargetException
 
 /**
  * Proxy activity that hosts imported APK activities.
  *
  * StubActivity IS the real Android Activity registered in the host manifest.
- * It loads the target Activity class reflectively, wires it up via Activity.attach(),
- * and delegates lifecycle calls to it.
+ * It loads the target Activity class reflectively, wires it up via attachBaseContext()
+ * + field injection, and delegates lifecycle calls to it.
  *
- * FIX: Now reuses the ClassLoader and Resources already loaded by StubApp
- * via PluginContext, instead of creating a second DexClassLoader.
- * This eliminates class identity conflicts between StubApp and StubActivity.
+ * FIX: Replaced complex Activity.attach() reflection (API-level-dependent signature)
+ * with simpler attachBaseContext() + field injection. Also unwraps InvocationTargetException
+ * to show the real error cause.
  */
 open class StubActivity : Activity() {
 
@@ -59,10 +59,17 @@ open class StubActivity : Activity() {
         Log.i(TAG, "Launching $targetPkg from $apkPath")
 
         try {
-            // 2. Get ClassLoader — prefer the one StubApp already loaded
+            // 2. Verify APK exists
+            if (!File(apkPath).exists()) {
+                Log.e(TAG, "APK not found at: $apkPath")
+                Toast("APK not found: $apkPath")
+                finish()
+                return
+            }
+
+            // 3. Get or create ClassLoader
             val classLoader: ClassLoader = PluginContext.getClassLoader()
                 ?: run {
-                    // Fallback: create one if StubApp didn't set it (shouldn't happen)
                     Log.w(TAG, "PluginContext has no ClassLoader, creating fallback")
                     val nativeLibDir = computeNativeLibDir(dataDir)
                     val cl = DexClassLoader(
@@ -75,28 +82,26 @@ open class StubActivity : Activity() {
                     cl
                 }
             targetClassLoader = classLoader
-            Log.d(TAG, "Using ClassLoader: ${if (PluginContext.getClassLoader() != null) "from PluginContext" else "fallback"}")
 
-            // 3. Get Resources — prefer the one StubApp already loaded
-            val resources: Resources = PluginContext.getResources()
+            // 4. Get or create Resources
+            val pluginResources: Resources = PluginContext.getResources()
                 ?: run {
                     Log.w(TAG, "PluginContext has no Resources, creating fallback")
-                    val assetManager = AssetManager::class.java.newInstance()
-                    val addAssetPath = assetManager.javaClass.getMethod("addAssetPath", String::class.java)
-                    addAssetPath.invoke(assetManager, apkPath)
-                    val res = Resources(assetManager, getResources().displayMetrics, getResources().configuration)
+                    val am = AssetManager::class.java.newInstance()
+                    val addAssetPath = am.javaClass.getMethod("addAssetPath", String::class.java)
+                    addAssetPath.invoke(am, apkPath)
+                    val res = Resources(am, getResources().displayMetrics, getResources().configuration)
                     PluginContext.setResources(res)
                     res
                 }
-            targetResources = resources
-            Log.d(TAG, "Using Resources: ${if (PluginContext.getResources() != null) "from PluginContext" else "fallback"}")
+            targetResources = pluginResources
 
-            // 4. Load target Application if StubApp hasn't already
+            // 5. Initialize target Application
             initTargetApplication(classLoader, apkPath, targetPkg, dataDir)
 
-            // 5. Find the launcher activity
+            // 6. Find launcher activity
             val launcherName = resolveLauncherActivity(apkPath, targetPkg)
-            if (launcherName == null) {
+            if (launcherName.isNullOrEmpty()) {
                 Log.e(TAG, "No launcher activity found in $targetPkg")
                 Toast("App has no launcher activity")
                 finish()
@@ -104,34 +109,153 @@ open class StubActivity : Activity() {
             }
             Log.d(TAG, "Launcher activity: $launcherName")
 
-            // 6. Instantiate the target Activity using the shared ClassLoader
+            // 7. Instantiate target Activity
             val targetClass = classLoader.loadClass(launcherName)
             val target = targetClass.newInstance() as Activity
             targetActivity = target
             Log.d(TAG, "Instantiated target Activity: $launcherName")
 
-            // 7. Wire up the target Activity via Activity.attach()
-            wireUpTargetActivity(target, targetPkg, apkPath, dataDir, classLoader)
+            // 8. Wire up the target Activity using simple, reliable approach:
+            //    attachBaseContext() + field injection (no complex Activity.attach())
+            wireUpTarget(target, targetPkg, pluginResources, classLoader)
 
-            // 8. Call target.onCreate()
-            val onCreate = Activity::class.java.getDeclaredMethod("onCreate", Bundle::class.java)
-            onCreate.isAccessible = true
-            onCreate.invoke(target, savedInstanceState)
+            // 9. Call target.onCreate()
+            callTargetOnCreate(target, savedInstanceState)
             Log.i(TAG, "✓ Target activity $launcherName launched successfully")
 
+        } catch (e: InvocationTargetException) {
+            // Unwrap the REAL error from inside the reflection wrapper
+            val realCause = e.cause ?: e
+            Log.e(TAG, "Launch failed (InvocationTargetException): ${realCause.javaClass.simpleName}: ${realCause.message}", realCause)
+            Toast("Launch failed: ${realCause.javaClass.simpleName}: ${realCause.message}")
+            finish()
         } catch (e: Exception) {
-            // e.message can be null (e.g. NullPointerException), use toString() for a useful message
             val errorDetail = e.message ?: e.toString()
-            Log.e(TAG, "Failed to launch $targetPkg: $errorDetail", e)
-            Toast("Launch failed: $errorDetail")
+            Log.e(TAG, "Launch failed: ${e.javaClass.simpleName}: $errorDetail", e)
+            Toast("Launch failed: ${e.javaClass.simpleName}: $errorDetail")
             finish()
         }
     }
 
     /**
-     * Initialize the target APK's Application class.
-     * StubApp may have already done this — check before duplicating.
+     * Wire up the target Activity using simple, reliable methods.
+     * Uses attachBaseContext() + field injection instead of complex Activity.attach()
+     * which has API-level-dependent signatures.
      */
+    private fun wireUpTarget(target: Activity, pkg: String, pluginResources: Resources, classLoader: ClassLoader) {
+        // Step 1: Create a wrapped context with target's resources and classloader
+        val wrappedContext = object : ContextWrapper(this) {
+            override fun getClassLoader(): ClassLoader = classLoader
+            override fun getResources(): Resources = pluginResources
+            override fun getAssets(): android.content.res.AssetManager = pluginResources.assets
+        }
+
+        // Step 2: Call attachBaseContext on target (this is safe, declared in ContextWrapper)
+        try {
+            val attachMethod = ContextWrapper::class.java.getDeclaredMethod("attachBaseContext", Context::class.java)
+            attachMethod.isAccessible = true
+            attachMethod.invoke(target, wrappedContext)
+            Log.d(TAG, "attachBaseContext succeeded")
+        } catch (e: InvocationTargetException) {
+            Log.e(TAG, "attachBaseContext failed: ${e.cause?.message}", e.cause)
+            throw e
+        }
+
+        // Step 3: Set mResources field directly
+        try {
+            val resField = Activity::class.java.getDeclaredField("mResources")
+            resField.isAccessible = true
+            resField.set(target, pluginResources)
+            Log.d(TAG, "mResources set")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to set mResources: ${e.message}")
+        }
+
+        // Step 4: Set mApplication field
+        try {
+            val appField = Activity::class.java.getDeclaredField("mApplication")
+            appField.isAccessible = true
+            appField.set(target, targetApp ?: application)
+            Log.d(TAG, "mApplication set")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to set mApplication: ${e.message}")
+        }
+
+        // Step 5: Set mToken (needed for window management)
+        try {
+            val tokenField = Activity::class.java.getDeclaredField("mToken")
+            tokenField.isAccessible = true
+            val token = tokenField.get(this) as? IBinder
+            tokenField.set(target, token)
+            Log.d(TAG, "mToken set")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to set mToken: ${e.message}")
+        }
+
+        // Step 6: Set mInstrumentation
+        try {
+            val instrField = Activity::class.java.getDeclaredField("mInstrumentation")
+            instrField.isAccessible = true
+            val atClass = Class.forName("android.app.ActivityThread")
+            val currentAT = atClass.getMethod("currentActivityThread").invoke(null)
+            val instrumentation = atClass.getDeclaredField("mInstrumentation").apply { isAccessible = true }.get(currentAT) as Instrumentation
+            instrField.set(target, instrumentation)
+            Log.d(TAG, "mInstrumentation set")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to set mInstrumentation: ${e.message}")
+        }
+
+        // Step 7: Set mActivityInfo
+        try {
+            val actInfoField = Activity::class.java.getDeclaredField("mActivityInfo")
+            actInfoField.isAccessible = true
+            val actInfo = ActivityInfo().apply {
+                packageName = pkg
+                name = target.javaClass.name
+                applicationInfo = ApplicationInfo().apply {
+                    packageName = pkg
+                    sourceDir = intent.getStringExtra("target_apk")
+                    publicSourceDir = intent.getStringExtra("target_apk")
+                }
+            }
+            actInfoField.set(target, actInfo)
+            Log.d(TAG, "mActivityInfo set")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to set mActivityInfo: ${e.message}")
+        }
+
+        // Step 8: Setup Window if available
+        try {
+            val window = target.window
+            if (window != null) {
+                val wm = getSystemService(Context.WINDOW_SERVICE)
+                val tokenField = Activity::class.java.getDeclaredField("mToken")
+                tokenField.isAccessible = true
+                val token = tokenField.get(this) as? IBinder
+                window.setWindowManager(wm as? android.view.WindowManager, token, null, false)
+                Log.d(TAG, "Window setup complete")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to setup window: ${e.message}")
+        }
+    }
+
+    /**
+     * Call the target activity's onCreate via reflection.
+     * Unwraps InvocationTargetException to show the real error.
+     */
+    private fun callTargetOnCreate(target: Activity, savedInstanceState: Bundle?) {
+        try {
+            val onCreate = Activity::class.java.getDeclaredMethod("onCreate", Bundle::class.java)
+            onCreate.isAccessible = true
+            onCreate.invoke(target, savedInstanceState)
+        } catch (e: InvocationTargetException) {
+            val cause = e.cause ?: e
+            Log.e(TAG, "Target onCreate() failed: ${cause.javaClass.simpleName}: ${cause.message}", cause)
+            throw e
+        }
+    }
+
     private fun initTargetApplication(classLoader: ClassLoader, apkPath: String, pkg: String, dataDir: String?) {
         try {
             val pm = packageManager
@@ -142,141 +266,29 @@ open class StubActivity : Activity() {
             val app = appClass.newInstance() as Application
             targetApp = app
 
-            // Call attachBaseContext via ContextWrapper (where it's declared)
             val attachMethod = ContextWrapper::class.java.getDeclaredMethod("attachBaseContext", Context::class.java)
             attachMethod.isAccessible = true
             attachMethod.invoke(app, this)
 
             app.onCreate()
             Log.i(TAG, "Target Application $appClassName initialized")
+        } catch (e: InvocationTargetException) {
+            Log.w(TAG, "Target Application init failed: ${e.cause?.message}")
         } catch (e: Exception) {
-            Log.w(TAG, "Target Application init failed (non-fatal, may already be loaded by StubApp): ${e.message}")
-        }
-    }
-
-    /**
-     * Wire up the target Activity so it can inflate layouts, show windows, etc.
-     * Uses Activity.attach() via reflection.
-     */
-    private fun wireUpTargetActivity(target: Activity, pkg: String, apkPath: String, dataDir: String?, classLoader: ClassLoader) {
-        try {
-            // Get ActivityThread
-            val atClass = Class.forName("android.app.ActivityThread")
-            val currentAT = atClass.getMethod("currentActivityThread").invoke(null)
-
-            // Get Instrumentation
-            val instrField = atClass.getDeclaredField("mInstrumentation")
-            instrField.isAccessible = true
-            val instrumentation = instrField.get(currentAT) as Instrumentation
-
-            // Get our token (IBinder from the system)
-            val tokenField = Activity::class.java.getDeclaredField("mToken")
-            tokenField.isAccessible = true
-            val token = tokenField.get(this) as? IBinder
-
-            // Build ApplicationInfo for the target
-            val appInfo = ApplicationInfo().apply {
-                packageName = pkg
-                sourceDir = apkPath
-                publicSourceDir = apkPath
-                nativeLibraryDir = computeNativeLibDir(dataDir)
-            }
-
-            // Build ActivityInfo
-            val actInfo = ActivityInfo().apply {
-                packageName = pkg
-                name = target.javaClass.name
-                applicationInfo = appInfo
-            }
-
-            // Find Activity.attach() — signature varies by API level
-            val attachMethod = findAttachMethod()
-
-            if (attachMethod != null) {
-                attachMethod.isAccessible = true
-                val params = attachMethod.parameterTypes
-                val args = arrayOfNulls<Any>(params.size)
-
-                for (i in params.indices) {
-                    args[i] = when {
-                        params[i] == Context::class.java -> this
-                        params[i].name == "android.app.ActivityThread" -> currentAT
-                        params[i] == Instrumentation::class.java -> instrumentation
-                        params[i] == IBinder::class.java -> token
-                        params[i] == Int::class.java || params[i] == Int::class.javaPrimitiveType -> 0
-                        params[i] == Application::class.java -> (targetApp ?: application)
-                        params[i] == Intent::class.java -> Intent().apply {
-                            setClassName(this@StubActivity, target.javaClass.name)
-                        }
-                        params[i] == ActivityInfo::class.java -> actInfo
-                        params[i] == CharSequence::class.java -> pkg as CharSequence
-                        params[i] == Activity::class.java -> this  // parent
-                        params[i] == String::class.java -> null    // id
-                        params[i] == Configuration::class.java -> resources.configuration
-                        params[i].name.contains("NonConfigurationInstances") -> null
-                        params[i] == Boolean::class.java || params[i] == Boolean::class.javaPrimitiveType -> false
-                        else -> null
-                    }
-                }
-
-                attachMethod.invoke(target, *args)
-                Log.d(TAG, "Activity.attach() succeeded with ${params.size} params")
-            } else {
-                // Manual field injection fallback
-                Log.w(TAG, "Activity.attach() not found, using field injection")
-                setField(target, "mApplication", targetApp ?: application)
-                setField(target, "mToken", token)
-                setField(target, "mInstrumentation", instrumentation)
-                setField(target, "mActivityInfo", actInfo)
-
-                // Set up Window
-                val window = target.window
-                if (window != null) {
-                    val wm = getSystemService(Context.WINDOW_SERVICE)
-                    window.setWindowManager(wm as? android.view.WindowManager, token, null, false)
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "wireUpTargetActivity failed", e)
-            // Last resort: set minimum fields
-            try {
-                setField(target, "mApplication", targetApp ?: application)
-            } catch (_: Exception) {}
-        }
-    }
-
-    private fun findAttachMethod(): Method? {
-        for (m in Activity::class.java.declaredMethods) {
-            if (m.name == "attach" && m.parameterTypes.size >= 8) {
-                return m
-            }
-        }
-        return null
-    }
-
-    private fun setField(obj: Any, fieldName: String, value: Any?) {
-        try {
-            val field = obj.javaClass.getDeclaredField(fieldName)
-            field.isAccessible = true
-            field.set(obj, value)
-        } catch (e: Exception) {
-            Log.d(TAG, "setField($fieldName) failed: ${e.message}")
+            Log.w(TAG, "Target Application init failed (non-fatal): ${e.message}")
         }
     }
 
     private fun resolveLauncherActivity(apkPath: String, packageName: String): String? {
         try {
             val pm = packageManager
-            // GET_ACTIVITIES | GET_INTENT_FILTERS to get intent filter info
             val pkgInfo = pm.getPackageArchiveInfo(
                 apkPath,
                 PackageManager.GET_ACTIVITIES or PackageManager.GET_META_DATA
             ) ?: return null
             val activities = pkgInfo.activities ?: return null
 
-            // Method 1: Find activity with MAIN/LAUNCHER intent filter
-            // getPackageArchiveInfo doesn't populate intentFilters directly,
-            // so we try to find it via the package's default launcher activity.
+            // Method 1: Use pm.resolveActivity with MAIN/LAUNCHER intent
             try {
                 val intent = Intent(Intent.ACTION_MAIN).apply {
                     addCategory(Intent.CATEGORY_LAUNCHER)
@@ -284,21 +296,12 @@ open class StubActivity : Activity() {
                 }
                 val resolveInfo = pm.resolveActivity(intent, 0)
                 if (resolveInfo?.activityInfo != null) {
-                    val name = resolveInfo.activityInfo.name
-                    Log.d(TAG, "Found launcher via resolveActivity: $name")
-                    return name
+                    Log.d(TAG, "Found launcher via resolveActivity: ${resolveInfo.activityInfo.name}")
+                    return resolveInfo.activityInfo.name
                 }
             } catch (_: Exception) {}
 
-            // Method 2: Find the first exported activity
-            for (act in activities) {
-                if (act.exported) {
-                    Log.d(TAG, "Found exported activity: ${act.name}")
-                    return act.name
-                }
-            }
-
-            // Method 3: Find activity whose name contains "Main" or "Launch"
+            // Method 2: Find by name pattern
             for (act in activities) {
                 val lower = act.name.lowercase()
                 if (lower.contains("main") || lower.contains("launch") || lower.contains("splash")) {
@@ -307,8 +310,16 @@ open class StubActivity : Activity() {
                 }
             }
 
+            // Method 3: First exported activity
+            for (act in activities) {
+                if (act.exported) {
+                    Log.d(TAG, "Found exported activity: ${act.name}")
+                    return act.name
+                }
+            }
+
             // Fallback: first activity
-            Log.w(TAG, "No MAIN/LAUNCHER found, using first activity: ${activities[0].name}")
+            Log.w(TAG, "No MAIN/LAUNCHER found, using first: ${activities[0].name}")
             return activities[0].name
         } catch (e: Exception) {
             Log.e(TAG, "resolveLauncherActivity failed", e)
@@ -340,8 +351,6 @@ open class StubActivity : Activity() {
     }
 
     // ── Resource & ClassLoader delegation ───────────────────────────
-    // These overrides ensure Android framework uses the target app's
-    // ClassLoader and Resources, not the host's.
 
     override fun getResources(): Resources {
         return targetResources ?: PluginContext.getResources() ?: super.getResources()
@@ -359,67 +368,37 @@ open class StubActivity : Activity() {
 
     override fun onStart() {
         super.onStart()
-        try {
-            val m = Activity::class.java.getDeclaredMethod("onStart")
-            m.isAccessible = true
-            m.invoke(targetActivity)
-        } catch (_: Exception) {}
+        try { targetActivity?.onStart() } catch (_: Exception) {}
     }
 
     override fun onResume() {
         super.onResume()
-        try {
-            val m = Activity::class.java.getDeclaredMethod("onResume")
-            m.isAccessible = true
-            m.invoke(targetActivity)
-        } catch (_: Exception) {}
+        try { targetActivity?.onResume() } catch (_: Exception) {}
     }
 
     override fun onPause() {
         super.onPause()
-        try {
-            val m = Activity::class.java.getDeclaredMethod("onPause")
-            m.isAccessible = true
-            m.invoke(targetActivity)
-        } catch (_: Exception) {}
+        try { targetActivity?.onPause() } catch (_: Exception) {}
     }
 
     override fun onStop() {
         super.onStop()
-        try {
-            val m = Activity::class.java.getDeclaredMethod("onStop")
-            m.isAccessible = true
-            m.invoke(targetActivity)
-        } catch (_: Exception) {}
+        try { targetActivity?.onStop() } catch (_: Exception) {}
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        try {
-            val m = Activity::class.java.getDeclaredMethod("onDestroy")
-            m.isAccessible = true
-            m.invoke(targetActivity)
-        } catch (_: Exception) {}
+        try { targetActivity?.onDestroy() } catch (_: Exception) {}
     }
 
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
-        try {
-            val m = Activity::class.java.getDeclaredMethod("onNewIntent", Intent::class.java)
-            m.isAccessible = true
-            m.invoke(targetActivity, intent)
-        } catch (_: Exception) {}
+        try { targetActivity?.onNewIntent(intent) } catch (_: Exception) {}
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        try {
-            val m = Activity::class.java.getDeclaredMethod(
-                "onActivityResult", Int::class.java, Int::class.java, Intent::class.java
-            )
-            m.isAccessible = true
-            m.invoke(targetActivity, requestCode, resultCode, data)
-        } catch (_: Exception) {}
+        try { targetActivity?.onActivityResult(requestCode, resultCode, data) } catch (_: Exception) {}
     }
 
     override fun onRequestPermissionsResult(
@@ -428,15 +407,6 @@ open class StubActivity : Activity() {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        try {
-            val m = Activity::class.java.getDeclaredMethod(
-                "onRequestPermissionsResult",
-                Int::class.java,
-                Array<String>::class.java,
-                IntArray::class.java
-            )
-            m.isAccessible = true
-            m.invoke(targetActivity, requestCode, permissions, grantResults)
-        } catch (_: Exception) {}
+        try { targetActivity?.onRequestPermissionsResult(requestCode, permissions, grantResults) } catch (_: Exception) {}
     }
 }
