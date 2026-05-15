@@ -10,12 +10,12 @@ import java.net.Socket
  * Client for the daemon's memory bridge. Runs inside cloned processes
  * to communicate with the host daemon for memory operations.
  */
-class DaemonClient {
+class DaemonClient(private val dataDir: File) {
 
     companion object {
         private const val TAG = "DaemonClient"
-        private const val MAX_RETRIES = 3
-        private const val RETRY_DELAY_MS = 500L
+        private const val MAX_RETRIES = 5
+        private const val RETRY_DELAY_MS = 300L
 
         // Must match DaemonServer constants
         private const val REQ_READ_MEM = 1
@@ -31,16 +31,23 @@ class DaemonClient {
     private var input: DataInputStream? = null
     private var output: DataOutputStream? = null
 
+    /** Port file — must match DaemonServer.portFile */
+    private val portFile: File = File(dataDir, "daemon_port")
+
     fun connect(): Boolean {
         for (attempt in 1..MAX_RETRIES) {
             try {
-                val portFile = File("/data/data/com.vspace.app/files/virtual_space/daemon_port")
                 if (!portFile.exists()) {
-                    Log.w(TAG, "Port file not found, retry $attempt")
+                    Log.w(TAG, "Port file not found (${portFile.absolutePath}), retry $attempt")
                     Thread.sleep(RETRY_DELAY_MS)
                     continue
                 }
                 val port = portFile.readText().trim().toInt()
+                if (port <= 0) {
+                    Log.w(TAG, "Invalid port: $port, retry $attempt")
+                    Thread.sleep(RETRY_DELAY_MS)
+                    continue
+                }
                 socket = Socket("127.0.0.1", port)
                 input = DataInputStream(socket!!.getInputStream())
                 output = DataOutputStream(socket!!.getOutputStream())
@@ -60,6 +67,8 @@ class DaemonClient {
         input = null
         output = null
     }
+
+    fun isConnected(): Boolean = socket?.isConnected == true && socket?.isClosed == false
 
     fun registerPid(pid: Int): Boolean {
         return try {

@@ -2,7 +2,7 @@ package com.vspace.engine
 
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
+import android.os.Build
 import android.util.Log
 import com.vspace.engine.ipc.DaemonServer
 import com.vspace.engine.model.VirtualAppInfo
@@ -50,6 +50,8 @@ class VirtualCore private constructor() {
         File(ctx.filesDir, "$VIRTUAL_DIR/stubs").mkdirs()
     }
 
+    fun getContext(): Context? = context
+
     fun getVirtualRoot(): File {
         return File(context!!.filesDir, VIRTUAL_DIR)
     }
@@ -92,7 +94,7 @@ class VirtualCore private constructor() {
             apkPath = destApk.absolutePath,
             dataDir = dataDir.absolutePath,
             versionName = pkgInfo.versionName ?: "1.0",
-            versionCode = if (android.os.Build.VERSION.SDK_INT >= 28) pkgInfo.longVersionCode.toInt()
+            versionCode = if (Build.VERSION.SDK_INT >= 28) pkgInfo.longVersionCode.toInt()
                           else @Suppress("DEPRECATION") pkgInfo.versionCode,
             stubProcessIndex = vpm.assignProcessSlot(),
             icon = null // loaded lazily
@@ -135,7 +137,7 @@ class VirtualCore private constructor() {
             return false
         }
 
-        // Patch 7: verify APK exists before launch
+        // Verify APK exists before launch
         val apkFile = File(app.apkPath)
         if (!apkFile.exists()) {
             Log.e(TAG, "APK file missing for $packageName: ${app.apkPath}")
@@ -143,18 +145,17 @@ class VirtualCore private constructor() {
             return false
         }
 
-        // Patch 7: verify stub slot is within declared proxy range
+        // Verify stub slot is within declared proxy range
         val stubIndex = app.stubProcessIndex
         if (stubIndex < 0 || stubIndex > 9) {
             Log.e(TAG, "Invalid stub slot $stubIndex for $packageName (max 9)")
             return false
         }
 
-        // Patch 2: Use host package, not the stub package
         val hostPkg = ctx.packageName
         val stubClass = "com.vspace.engine.stub.StubActivity$stubIndex"
 
-        // Write launch config as fallback (Patch 3: extras are primary)
+        // Write launch config (fallback channel)
         LaunchConfig.write(
             ctx,
             processName = ":p$stubIndex",
@@ -164,10 +165,9 @@ class VirtualCore private constructor() {
         )
 
         val intent = Intent().apply {
-            // Patch 2: point to host package proxy activities
             setClassName(hostPkg, stubClass)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            // Patch 3: pass config via intent extras (primary channel)
+            // Pass config via intent extras (primary channel)
             putExtra("target_pkg", packageName)
             putExtra("target_apk", app.apkPath)
             putExtra("target_data", app.dataDir)
@@ -185,7 +185,9 @@ class VirtualCore private constructor() {
     // ── Daemon ──────────────────────────────────────────────────────
 
     fun startDaemon() {
-        daemonServer = DaemonServer()
+        val ctx = context ?: return
+        val dataDir = File(ctx.filesDir, VIRTUAL_DIR)
+        daemonServer = DaemonServer(dataDir)
         daemonServer?.start()
         Log.i(TAG, "Virtual daemon started")
     }
@@ -201,16 +203,14 @@ class VirtualCore private constructor() {
     // ── Native Lib Extraction ───────────────────────────────────────
 
     /**
-     * Patch 4: Extract native libraries for the current device ABI
-     * directly into dataDir/lib/ (not dataDir/lib/<abi>/).
-     * DexClassLoader needs a directory containing loadable .so files.
+     * Extract native libraries for the current device ABI
+     * directly into dataDir/lib/.
      */
     private fun extractNativeLibs(apkFile: File, dataDir: File) {
         try {
             val libDir = File(dataDir, "lib")
             libDir.mkdirs()
 
-            // Find the best matching ABI from the APK
             val zipFile = java.util.zip.ZipFile(apkFile)
             val entries = zipFile.entries()
             val abiEntries = mutableMapOf<String, MutableList<Pair<String, java.io.InputStream>>>()
@@ -222,7 +222,6 @@ class VirtualCore private constructor() {
                     if (!abiEntries.containsKey(abi)) {
                         abiEntries[abi] = mutableListOf()
                     }
-                    // Read into memory since zip stream closes
                     val bytes = zipFile.getInputStream(entry).readBytes()
                     val fileName = entry.name.substringAfterLast("/")
                     abiEntries[abi]!!.add(fileName to bytes.inputStream())
@@ -231,10 +230,9 @@ class VirtualCore private constructor() {
             zipFile.close()
 
             // Pick the best ABI for this device
-            for (abi in android.os.Build.SUPPORTED_ABIS) {
+            for (abi in Build.SUPPORTED_ABIS) {
                 val libs = abiEntries[abi]
                 if (libs != null && libs.isNotEmpty()) {
-                    // Patch 4: extract directly to dataDir/lib/, not dataDir/lib/<abi>/
                     for ((fileName, stream) in libs) {
                         stream.use { input ->
                             File(libDir, fileName).outputStream().use { output ->

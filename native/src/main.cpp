@@ -23,7 +23,9 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
         LOGE("hook_init failed: %d", ret);
     }
 
-    // Register hooks for libc functions
+    // Original function pointers are stored in hook.cpp's static variables.
+    // hook_register stores the hook function and will set *orig_func when GOT is patched.
+    // We pass nullptr for orig_func since the originals are managed internally by hook.cpp.
     hook_register(".*\\.so$", "open",   (void*)hook_open,   nullptr);
     hook_register(".*\\.so$", "openat", (void*)hook_openat, nullptr);
     hook_register(".*\\.so$", "fopen",  (void*)hook_fopen,  nullptr);
@@ -32,11 +34,14 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
     hook_register(".*\\.so$", "ptrace", (void*)hook_ptrace, nullptr);
     hook_register(".*\\.so$", "execve", (void*)hook_execve, nullptr);
 
-    // Apply all hooks
+    // Apply all hooks (scans /proc/self/maps and patches GOT entries)
     ret = hook_refresh();
     if (ret != 0) {
         LOGE("hook_refresh failed: %d", ret);
     }
+
+    // Initialize su stub
+    su_stub_init();
 
     LOGI("vengine hooks installed");
     return JNI_VERSION_1_6;
@@ -53,7 +58,12 @@ Java_com_vspace_engine_VirtualCore_nativeInit(
     // Initialize IO redirection
     io_redirect_init(path);
 
-    // Initialize memory bridge
+    // Set the port file path for memory bridge
+    char port_path[512];
+    snprintf(port_path, sizeof(port_path), "%s/virtual_space/daemon_port", path);
+    memory_bridge_set_port_file(port_path);
+
+    // Initialize memory bridge (will connect when daemon is ready)
     memory_bridge_init();
 
     env->ReleaseStringUTFChars(dataPath, path);
@@ -83,7 +93,7 @@ Java_com_vspace_engine_VirtualCore_nativeRedirectPath(
     return result;
 }
 
-// ── Memory Read/Write JNI ──────────────────────────────────────────
+// ── Memory Read/Write JNI (VirtualCore) ────────────────────────────
 
 extern "C" JNIEXPORT jbyteArray JNICALL
 Java_com_vspace_engine_VirtualCore_nativeReadMemory(

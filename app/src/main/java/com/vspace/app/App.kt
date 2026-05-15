@@ -6,6 +6,9 @@ import android.app.NotificationManager
 import android.os.Build
 import android.util.Log
 import com.vspace.engine.VirtualCore
+import com.vspace.engine.hook.BinderHook
+import com.vspace.engine.pm.LaunchConfig
+import com.vspace.engine.stub.PluginContext
 
 class App : Application() {
 
@@ -23,14 +26,9 @@ class App : Application() {
         VirtualCore.get().init(this)
 
         // Detect if we're running in a stub process (:p0, :p1, ... :p9).
-        // If so, we need to load the target app's environment here because
-        // StubApp (from the stub module) is NOT the Application class for
-        // these processes — this App class is.
-        val processName = if (Build.VERSION.SDK_INT >= 28) {
-            getProcessName()
-        } else {
-            try { java.io.File("/proc/self/cmdline").readText().trim() } catch (_: Exception) { "" }
-        }
+        // If so, load the target app's environment and install hooks.
+        val processName = getProcessNameCompat()
+        Log.d(TAG, "Process: $processName")
 
         if (processName != null && processName.contains(":p")) {
             val suffix = processName.substringAfterLast(":")
@@ -42,15 +40,26 @@ class App : Application() {
     }
 
     /**
+     * Get process name compatible with all Android versions.
+     * Android 9+ has Application.getProcessName(), older versions read /proc/self/cmdline.
+     */
+    private fun getProcessNameCompat(): String? {
+        return if (Build.VERSION.SDK_INT >= 28) {
+            getProcessName()
+        } else {
+            try {
+                java.io.File("/proc/self/cmdline").readText().trim('\u0000', ' ', '\t')
+            } catch (_: Exception) { null }
+        }
+    }
+
+    /**
      * Load the target app's ClassLoader, Resources, and Application
-     * into PluginContext so StubActivity can use them.
-     *
-     * This replicates what StubApp.onCreate() does, but runs in the
-     * app's process where StubApp is never instantiated.
+     * into stub processes. Also installs hooks needed for GameGuardian.
      */
     private fun loadStubEnvironment(processSuffix: String) {
         try {
-            val config = com.vspace.engine.pm.LaunchConfig.read(this, processSuffix)
+            val config = LaunchConfig.read(this, processSuffix)
             if (config == null) {
                 Log.w(TAG, "No launch config for $processSuffix")
                 return
@@ -79,9 +88,40 @@ class App : Application() {
             )
 
             // Store in PluginContext for StubActivity to use
-            com.vspace.engine.stub.PluginContext.setClassLoader(dexClassLoader)
-            com.vspace.engine.stub.PluginContext.setResources(targetResources)
+            PluginContext.setClassLoader(dexClassLoader)
+            PluginContext.setResources(targetResources)
             Log.d(TAG, "PluginContext populated for $processSuffix")
+
+            // Register IO redirect for this package
+            try {
+                val ioRedirectInit = com.vspace.engine.hook.BinderHook::class.java
+                // Use native IO redirect
+                com.vspace.engine.VirtualCore.get()
+                // Register the package for path redirection
+                if (dataDir != null) {
+                    // This is done via native io_redirect_add_package
+                    // but we pass it through the data path init
+                    Log.d(TAG, "IO redirect will handle ${config.targetPkg} -> $dataDir")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "IO redirect registration failed (non-fatal): ${e.message}")
+            }
+
+            // Install BinderHook for system service interception
+            try {
+                BinderHook.install()
+                Log.d(TAG, "BinderHook installed in stub process")
+            } catch (e: Exception) {
+                Log.w(TAG, "BinderHook install failed (non-fatal): ${e.message}")
+            }
+
+            // Install native hooks (GOT/PLT patching)
+            try {
+                VirtualCore.get().nativeInstallHooks()
+                Log.d(TAG, "Native hooks installed in stub process")
+            } catch (e: Exception) {
+                Log.w(TAG, "Native hook install failed (non-fatal): ${e.message}")
+            }
 
             // Load target Application class if it has one
             val pm = packageManager

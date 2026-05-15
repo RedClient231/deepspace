@@ -21,6 +21,9 @@ static const char* HIDDEN_PATHS[] = {
     "com.vspace.stub",
     "libvengine.so",
     "virtual_space",
+    "daemon_port",
+    "virtual_apps.json",
+    "launch_config.json",
     nullptr
 };
 
@@ -40,12 +43,32 @@ void io_redirect_add_package(const char* package_name, const char* data_dir) {
     LOGD("io_redirect_add_package: %s -> %s", package_name, data_dir);
 }
 
+// ── Path Hiding (Anti-Detection) ───────────────────────────────────
+
+static bool should_hide_path(const char* path) {
+    if (!path) return false;
+    for (int i = 0; HIDDEN_PATHS[i] != nullptr; i++) {
+        if (strstr(path, HIDDEN_PATHS[i]) != nullptr) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // ── Path Redirection ───────────────────────────────────────────────
 
 const char* redirect_path(const char* path) {
     if (!path) return nullptr;
 
     std::lock_guard<std::mutex> lock(g_redirect_mutex);
+
+    // Anti-detection: redirect paths that would reveal the virtual engine
+    if (should_hide_path(path)) {
+        // Return /dev/null for paths that would reveal us
+        static const char* DEV_NULL = "/dev/null";
+        LOGD("redirect_path (hide): %s -> %s", path, DEV_NULL);
+        return DEV_NULL;
+    }
 
     // Check for /data/data/<pkg>/ or /data/user/0/<pkg>/
     const char* prefixes[] = {"/data/data/", "/data/user/0/", nullptr};
@@ -66,6 +89,7 @@ const char* redirect_path(const char* path) {
             static thread_local char new_path[4096];
             snprintf(new_path, sizeof(new_path), "%s/%s%s",
                      it->second.c_str(), pkg.c_str(), slash);
+            LOGD("redirect_path: %s -> %s", path, new_path);
             return new_path;
         }
     }
@@ -84,22 +108,11 @@ const char* redirect_path(const char* path) {
                 snprintf(new_path, sizeof(new_path),
                          "%s/virtual_sd/%s%s",
                          g_virtual_root.c_str(), pkg.c_str(), slash);
+                LOGD("redirect_path: %s -> %s", path, new_path);
                 return new_path;
             }
         }
     }
 
     return nullptr; // No redirect needed
-}
-
-// ── Path Hiding (Anti-Detection) ───────────────────────────────────
-
-bool should_hide_path(const char* path) {
-    if (!path) return false;
-    for (int i = 0; HIDDEN_PATHS[i] != nullptr; i++) {
-        if (strstr(path, HIDDEN_PATHS[i]) != nullptr) {
-            return true;
-        }
-    }
-    return false;
 }

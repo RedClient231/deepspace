@@ -49,11 +49,14 @@ class MemoryBridge {
 
     /**
      * Check if we can access a target process's memory.
+     * Tests by reading a small amount from a known-safe address.
      */
     fun canAccess(pid: Int): Boolean {
         return try {
-            val testRead = nativeReadMemory(pid, 0, 1)
-            true // If it doesn't crash, we have access
+            // Test with a small read from the process's own mapping
+            // (reading 0 bytes should succeed if we have access)
+            val testRead = nativeReadMemory(pid, 0x1000, 4)
+            testRead != null && testRead.size > 0
         } catch (e: Exception) {
             false
         }

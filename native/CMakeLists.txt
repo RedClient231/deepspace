@@ -37,8 +37,13 @@ target_compile_options(vengine PRIVATE
     -fvisibility=hidden
     -ffunction-sections
     -fdata-sections
+    -fno-exceptions
+    -fno-rtti
 )
 
 # Strip in release
 set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -s")
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -s")
+
+# LTO for smaller binary
+set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--gc-sections -Wl,--icf=safe")

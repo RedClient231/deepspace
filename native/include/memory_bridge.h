@@ -30,3 +30,9 @@ int memory_bridge_read(int pid, uint64_t addr, void* buf, size_t len);
 int memory_bridge_write(int pid, uint64_t addr, const void* buf, size_t len);
 int memory_bridge_register_pid(int pid);
 bool memory_bridge_is_connected();
+
+/**
+ * Set the daemon port file path. Must be called before init.
+ * @param path  Absolute path to the port file
+ */
+void memory_bridge_set_port_file(const char* path);

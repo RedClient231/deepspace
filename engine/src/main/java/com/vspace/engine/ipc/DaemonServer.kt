@@ -14,12 +14,10 @@ import java.util.concurrent.Executors
  * to cloned processes. Uses process_vm_readv/writev for actual memory
  * operations (no root required since all processes share the same UID).
  */
-class DaemonServer {
+class DaemonServer(private val dataDir: File) {
 
     companion object {
         private const val TAG = "DaemonServer"
-        private const val SOCKET_NAME = "vspace_daemon"
-        private const val PORT = 0 // Use abstract namespace
 
         // Request types
         const val REQ_READ_MEM = 1
@@ -39,21 +37,22 @@ class DaemonServer {
     private val registeredPids = ConcurrentHashMap<Int, Boolean>()
     private val memoryBridge = MemoryBridge()
 
+    /** Port file path — shared with DaemonClient */
+    val portFile: File = File(dataDir, "daemon_port")
+
     fun start() {
         if (running) return
         running = true
 
         executor.execute {
             try {
-                // Use abstract Unix domain socket via /proc/self/fd trick
-                // For simplicity, we use a local TCP socket on loopback
                 serverSocket = ServerSocket(0, 50, java.net.InetAddress.getByName("127.0.0.1"))
                 val port = serverSocket!!.localPort
                 Log.i(TAG, "Daemon listening on 127.0.0.1:$port")
 
                 // Write port to file so clients can find it
-                val portFile = File("/data/data/com.vspace.app/files/virtual_space/daemon_port")
                 portFile.writeText(port.toString())
+                Log.d(TAG, "Port file: ${portFile.absolutePath}")
 
                 while (running) {
                     try {
@@ -72,6 +71,7 @@ class DaemonServer {
     fun stop() {
         running = false
         try { serverSocket?.close() } catch (_: Exception) {}
+        try { portFile.delete() } catch (_: Exception) {}
         executor.shutdownNow()
         Log.i(TAG, "Daemon stopped")
     }

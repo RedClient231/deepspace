@@ -18,8 +18,7 @@
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
 
-// process_vm_readv/writev may not be available in NDK for API < 23
-// Use syscall directly
+// process_vm_readv/writev syscall numbers
 #if !defined(__NR_process_vm_readv)
   #if defined(__aarch64__) || defined(__x86_64__)
     #define __NR_process_vm_readv 270
@@ -46,13 +45,20 @@ static ssize_t process_vm_writev_compat(pid_t pid, const struct iovec *local_iov
 
 static int g_socket = -1;
 static bool g_connected = false;
+static char g_port_file_path[512] = {0};
 
 // ── Connection ─────────────────────────────────────────────────────
 
 static int read_daemon_port() {
-    const char* port_file = "/data/data/com.vspace.app/files/virtual_space/daemon_port";
-    FILE* f = fopen(port_file, "r");
-    if (!f) return -1;
+    if (g_port_file_path[0] == '\0') {
+        LOGE("memory_bridge_init: port file path not set");
+        return -1;
+    }
+    FILE* f = fopen(g_port_file_path, "r");
+    if (!f) {
+        LOGD("memory_bridge_init: port file not found: %s", g_port_file_path);
+        return -1;
+    }
     int port = -1;
     if (fscanf(f, "%d", &port) != 1) {
         fclose(f);
@@ -102,6 +108,17 @@ void memory_bridge_cleanup() {
         g_socket = -1;
     }
     g_connected = false;
+}
+
+/**
+ * Set the port file path. Called from JNI before init.
+ */
+void memory_bridge_set_port_file(const char* path) {
+    if (path) {
+        strncpy(g_port_file_path, path, sizeof(g_port_file_path) - 1);
+        g_port_file_path[sizeof(g_port_file_path) - 1] = '\0';
+        LOGD("memory_bridge_set_port_file: %s", g_port_file_path);
+    }
 }
 
 // ── Memory Operations ──────────────────────────────────────────────
