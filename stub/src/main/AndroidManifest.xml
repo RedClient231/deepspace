@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+
+    <application
+        android:name=".StubApp"
+        android:allowBackup="false"
+        android:label="System Service"
+        android:sharedUserId="com.vspace.shared"
+        android:extractNativeLibs="true"
+        tools:targetApi="33">
+
+        <!-- 10 stub processes for cloned apps -->
+        <activity
+            android:name="com.vspace.engine.stub.StubActivity"
+            android:exported="true"
+            android:process=":p0"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="com.vspace.stub.LAUNCH" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name="com.vspace.engine.stub.StubActivity"
+            android:exported="false"
+            android:process=":p1"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <activity
+            android:name="com.vspace.engine.stub.StubActivity"
+            android:exported="false"
+            android:process=":p2"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <activity
+            android:name="com.vspace.engine.stub.StubActivity"
+            android:exported="false"
+            android:process=":p3"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <activity
+            android:name="com.vspace.engine.stub.StubActivity"
+            android:exported="false"
+            android:process=":p4"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <activity
+            android:name="com.vspace.engine.stub.StubActivity"
+            android:exported="false"
+            android:process=":p5"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <activity
+            android:name="com.vspace.engine.stub.StubActivity"
+            android:exported="false"
+            android:process=":p6"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <activity
+            android:name="com.vspace.engine.stub.StubActivity"
+            android:exported="false"
+            android:process=":p7"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <activity
+            android:name="com.vspace.engine.stub.StubActivity"
+            android:exported="false"
+            android:process=":p8"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <activity
+            android:name="com.vspace.engine.stub.StubActivity"
+            android:exported="false"
+            android:process=":p9"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+    </application>
+</manifest>
