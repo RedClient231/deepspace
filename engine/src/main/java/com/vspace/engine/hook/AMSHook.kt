@@ -1,5 +1,6 @@
 package com.vspace.engine.hook
 
+import android.content.Intent
 import android.util.Log
 import java.lang.reflect.InvocationHandler
 import java.lang.reflect.Method
@@ -27,7 +28,7 @@ class AMSHook : InvocationHandler {
         val name = method?.name ?: return null
 
         return when (name) {
-            "startActivity" -> handleStartActivity(method, args?.copyOf())
+            "startActivity" -> handleStartActivity(method, args)
             "startService" -> handleStartService(method, args)
             "sendBroadcast" -> handleSendBroadcast(method, args)
             "getRunningAppProcesses" -> handleGetRunningProcesses(method, args)
@@ -38,23 +39,20 @@ class AMSHook : InvocationHandler {
 
     private fun handleStartActivity(method: Method, args: Array<out Any?>?): Any? {
         Log.d(TAG, "Intercepting startActivity")
-        // Replace intent target with stub activity
         if (args != null && args.isNotEmpty()) {
-            val mutableArgs = args.copyOf()
-            for (i in mutableArgs.indices) {
-                val arg = mutableArgs[i]
-                if (arg is android.content.Intent) {
-                    val originalIntent = arg
-                    val targetPkg = originalIntent.component?.packageName
+            val newArgs: Array<Any?> = args.copyOf()
+            for (i in newArgs.indices) {
+                val arg = newArgs[i]
+                if (arg is Intent) {
+                    val targetPkg = arg.component?.packageName
                     if (targetPkg != null && isVirtualApp(targetPkg)) {
-                        // Redirect through stub
-                        val stubIntent = createStubIntent(originalIntent)
-                        mutableArgs[i] = stubIntent
+                        val stubIntent = createStubIntent(arg)
+                        newArgs[i] = stubIntent
                         Log.d(TAG, "Redirected $targetPkg through stub")
                     }
                 }
             }
-            return method.invoke(null, *mutableArgs)
+            return method.invoke(null, *newArgs)
         }
         return method.invoke(null, *(args ?: emptyArray()))
     }
@@ -71,12 +69,10 @@ class AMSHook : InvocationHandler {
 
     private fun handleGetRunningProcesses(method: Method, args: Array<out Any?>?): Any? {
         val result = method.invoke(null, *(args ?: emptyArray()))
-        // Filter out virtual engine processes
         return result
     }
 
     private fun handleCheckPermission(method: Method, args: Array<out Any?>?): Any? {
-        // Grant all permissions for virtual apps
         return android.content.pm.PackageManager.PERMISSION_GRANTED
     }
 
@@ -84,15 +80,15 @@ class AMSHook : InvocationHandler {
         return com.vspace.engine.VirtualCore.get().isAppInstalled(packageName)
     }
 
-    private fun createStubIntent(original: android.content.Intent): android.content.Intent {
-        val stubIndex = 0 // Determine correct stub slot
-        return android.content.Intent().apply {
+    private fun createStubIntent(original: Intent): Intent {
+        val stubIndex = 0
+        return Intent().apply {
             setClassName(
                 "com.vspace.stub$stubIndex",
-                "com.vspace.stub.StubActivity$stubIndex"
+                "com.vspace.engine.stub.StubActivity$stubIndex"
             )
             putExtra("original_intent", original)
-            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
     }
 }

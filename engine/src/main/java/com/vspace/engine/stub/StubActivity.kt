@@ -14,7 +14,7 @@ import android.util.Log
  * Each cloned app's main activity is launched inside a StubActivity
  * in one of the pre-defined stub processes (:p0, :p1, ... :pN).
  */
-class StubActivity : Activity() {
+open class StubActivity : Activity() {
 
     companion object {
         private const val TAG = "StubActivity"
