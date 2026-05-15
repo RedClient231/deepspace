@@ -1,4 +1,6 @@
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include "memory_bridge.h"
 #include <android/log.h>
 #include <sys/socket.h>

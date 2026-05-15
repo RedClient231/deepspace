@@ -18,42 +18,63 @@
 #include <fcntl.h>
 #include <fnmatch.h>
 #include <sys/syscall.h>
-#include <unistd.h>
 
 #define TAG "vhook"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
 
-// ── Architecture Detection ──────────────────────────────────────────
-
+// Use the NDK-provided ELF types directly (no redefining)
+// On LP64: Elf64_Ehdr, Elf64_Sym, etc.  On 32-bit: Elf32_Ehdr, etc.
 #if defined(__LP64__)
-  #define ELF_EHDR Elf64_Ehdr
-  #define ELF_PHDR Elf64_Phdr
-  #define ELF_SHDR Elf64_Shdr
-  #define ELF_SYM  Elf64_Sym
-  #define ELF_REL  Elf64_Rel
-  #define ELF_RELA Elf64_Rela
-  #define ELF_DYN  Elf64_Dyn
-  #define ELF_R_SYM(x) ELF64_R_SYM(x)
-  #define ELF_R_TYPE(x) ELF64_R_TYPE(x)
-  #define ELF_ST_BIND(x) ELF64_ST_BIND(x)
-  #define R_JUMP_SLOT R_X86_64_JUMP_SLOT
-  #define R_GLOB_DAT  R_X86_64_GLOB_DAT
+  typedef Elf64_Ehdr  VEHdr;
+  typedef Elf64_Phdr  VPHdr;
+  typedef Elf64_Dyn   VDyn;
+  typedef Elf64_Sym   VSym;
+  typedef Elf64_Rel   VRel;
+  typedef Elf64_Rela  VRela;
 #else
-  #define ELF_EHDR Elf32_Ehdr
-  #define ELF_PHDR Elf32_Phdr
-  #define ELF_SHDR Elf32_Shdr
-  #define ELF_SYM  Elf32_Sym
-  #define ELF_REL  Elf32_Rel
-  #define ELF_RELA Elf32_Rela
-  #define ELF_DYN  Elf32_Dyn
-  #define ELF_R_SYM(x) ELF32_R_SYM(x)
-  #define ELF_R_TYPE(x) ELF32_R_TYPE(x)
-  #define ELF_ST_BIND(x) ELF32_ST_BIND(x)
-  #define R_JUMP_SLOT R_ARM_JUMP_SLOT
-  #define R_GLOB_DAT  R_ARM_GLOB_DAT
+  typedef Elf32_Ehdr  VEHdr;
+  typedef Elf32_Phdr  VPHdr;
+  typedef Elf32_Dyn   VDyn;
+  typedef Elf32_Sym   VSym;
+  typedef Elf32_Rel   VRel;
+  typedef Elf32_Rela  VRela;
 #endif
+
+// Relocation type for jump slots (architecture-specific)
+#if defined(__aarch64__)
+  #define V_R_JUMP_SLOT R_AARCH64_JUMP_SLOT
+  #define V_R_GLOB_DAT  R_AARCH64_GLOB_DAT
+  #define V_R_SYM(info) ELF64_R_SYM(info)
+  #define V_R_TYPE(info) ELF64_R_TYPE(info)
+#elif defined(__arm__)
+  #define V_R_JUMP_SLOT R_ARM_JUMP_SLOT
+  #define V_R_GLOB_DAT  R_ARM_GLOB_DAT
+  #define V_R_SYM(info) ELF32_R_SYM(info)
+  #define V_R_TYPE(info) ELF32_R_TYPE(info)
+#elif defined(__x86_64__)
+  #define V_R_JUMP_SLOT R_X86_64_JUMP_SLOT
+  #define V_R_GLOB_DAT  R_X86_64_GLOB_DAT
+  #define V_R_SYM(info) ELF64_R_SYM(info)
+  #define V_R_TYPE(info) ELF64_R_TYPE(info)
+#elif defined(__i386__)
+  #define V_R_JUMP_SLOT R_386_JMP_SLOT
+  #define V_R_GLOB_DAT  R_386_GLOB_DAT
+  #define V_R_SYM(info) ELF32_R_SYM(info)
+  #define V_R_TYPE(info) ELF32_R_TYPE(info)
+#endif
+
+// ── Forward declarations: original function pointers ────────────────
+// These must be declared before hook_refresh() which references them.
+
+static int (*orig_open)(const char*, int, ...) = nullptr;
+static int (*orig_openat)(int, const char*, int, ...) = nullptr;
+static FILE* (*orig_fopen)(const char*, const char*) = nullptr;
+static int (*orig_stat)(const char*, struct stat*) = nullptr;
+static int (*orig_access)(const char*, int) = nullptr;
+static long (*orig_ptrace)(int, pid_t, void*, void*) = nullptr;
+static int (*orig_execve)(const char*, char* const[], char* const[]) = nullptr;
 
 // ── Hook Entry ─────────────────────────────────────────────────────
 
@@ -62,8 +83,7 @@ struct HookEntry {
     std::string func_name;
     void* hook_func;
     void** orig_func;
-    void* original_addr;    // saved original function address
-    void** got_entry;       // GOT entry address (for unhooking)
+    void* original_addr;
 };
 
 static std::vector<HookEntry> g_hooks;
@@ -75,6 +95,7 @@ static bool g_hooks_applied = false;
 struct MapEntry {
     uintptr_t start;
     uintptr_t end;
+    uintptr_t offset;
     std::string path;
     bool is_exec;
 };
@@ -86,13 +107,16 @@ static std::vector<MapEntry> parse_maps() {
 
     char line[512];
     while (fgets(line, sizeof(line), fp)) {
-        uintptr_t start, end;
+        uintptr_t start, end, offset;
         char perms[5], path[256] = "";
-        if (sscanf(line, "%lx-%lx %4s %*s %*s %*s %255[^\n]",
-                   &start, &end, perms, path) >= 3) {
+        // Format: start-end perms offset dev inode pathname
+        int n = sscanf(line, "%lx-%lx %4s %lx %*s %*s %255[^\n]",
+                       &start, &end, perms, &offset, path);
+        if (n >= 3) {
             MapEntry entry;
             entry.start = start;
             entry.end = end;
+            entry.offset = (n >= 4) ? offset : 0;
             entry.path = path;
             entry.is_exec = (perms[2] == 'x');
             // Trim leading whitespace from path
@@ -107,19 +131,28 @@ static std::vector<MapEntry> parse_maps() {
     return entries;
 }
 
+// ── Find library base address ──────────────────────────────────────
+
+static uintptr_t find_library_base(const char* lib_path) {
+    auto maps = parse_maps();
+    for (auto& m : maps) {
+        // The first mapping of a library with offset 0 is the base
+        if (m.path == lib_path && m.offset == 0) {
+            return m.start;
+        }
+    }
+    return 0;
+}
+
 // ── ELF GOT Patching ───────────────────────────────────────────────
 
-/**
- * Find .got.plt section and patch a specific symbol's entry.
- * Works with both ELF32 and ELF64.
- */
 static int patch_got_in_library(uintptr_t base_addr, const char* lib_path,
                                  const char* symbol_name, void* new_func, void** orig_out) {
-    // Read ELF header
-    ELF_EHDR ehdr;
     if (base_addr == 0) return -1;
 
-    memcpy(&ehdr, (void*)base_addr, sizeof(ELF_Ehdr));
+    // Read ELF header from memory
+    VEHdr ehdr;
+    memcpy(&ehdr, (void*)base_addr, sizeof(VEHdr));
 
     // Verify ELF magic
     if (memcmp(ehdr.e_ident, ELFMAG, SELFMAG) != 0) {
@@ -127,38 +160,33 @@ static int patch_got_in_library(uintptr_t base_addr, const char* lib_path,
     }
 
     // Find program headers to get dynamic section
-    ELF_PHDR* phdrs = (ELF_PHDR*)(base_addr + ehdr.e_phoff);
-    ELF_DYN* dynamic = nullptr;
-    uintptr_t dynamic_vaddr = 0;
+    VPHdr* phdrs = (VPHdr*)(base_addr + ehdr.e_phoff);
+    VDyn* dynamic = nullptr;
 
     for (int i = 0; i < ehdr.e_phnum; i++) {
         if (phdrs[i].p_type == PT_DYNAMIC) {
-            dynamic = (ELF_DYN*)(base_addr + phdrs[i].p_vaddr);
-            dynamic_vaddr = phdrs[i].p_vaddr;
+            dynamic = (VDyn*)(base_addr + phdrs[i].p_vaddr);
             break;
         }
     }
 
     if (!dynamic) return -1;
 
-    // Parse dynamic entries to find:
-    // - .dynsym (DT_SYMTAB)
-    // - .dynstr (DT_STRTAB)
-    // - .rel.plt / .rela.plt (DT_JMPREL)
-    // - .rel.dyn / .rela.dyn (DT_REL / DT_RELA)
-    ELF_SYM* symtab = nullptr;
+    // Parse dynamic entries
+    VSym* symtab = nullptr;
     const char* strtab = nullptr;
     void* jmprel = nullptr;
     size_t jmprel_size = 0;
     void* rel = nullptr;
     size_t rel_size = 0;
-    size_t relent_size = sizeof(ELF_REL);
-    size_t sym_ent_size = sizeof(ELF_SYM);
+    size_t relent_size = sizeof(VRel);
+    size_t sym_ent_size = sizeof(VSym);
+    bool is_rela = false;
 
-    for (ELF_DYN* d = dynamic; d->d_tag != DT_NULL; d++) {
+    for (VDyn* d = dynamic; d->d_tag != DT_NULL; d++) {
         switch (d->d_tag) {
             case DT_SYMTAB:
-                symtab = (ELF_SYM*)(base_addr + d->d_un.d_ptr);
+                symtab = (VSym*)(base_addr + d->d_un.d_ptr);
                 break;
             case DT_STRTAB:
                 strtab = (const char*)(base_addr + d->d_un.d_ptr);
@@ -170,21 +198,30 @@ static int patch_got_in_library(uintptr_t base_addr, const char* lib_path,
                 jmprel_size = d->d_un.d_val;
                 break;
             case DT_PLTREL:
-                // DT_REL or DT_RELA
-                relent_size = (d->d_un.d_val == DT_RELA) ? sizeof(ELF_RELA) : sizeof(ELF_REL);
+                is_rela = (d->d_un.d_val == DT_RELA);
+                relent_size = is_rela ? sizeof(VRela) : sizeof(VRel);
                 break;
             case DT_REL:
-            case DT_RELA:
                 rel = (void*)(base_addr + d->d_un.d_ptr);
                 break;
             case DT_RELSZ:
-            case DT_RELASZ:
                 rel_size = d->d_un.d_val;
                 break;
             case DT_RELENT:
+                relent_size = d->d_un.d_val;
+                break;
+#ifdef DT_RELA
+            case DT_RELA:
+                rel = (void*)(base_addr + d->d_un.d_ptr);
+                is_rela = true;
+                break;
+            case DT_RELASZ:
+                rel_size = d->d_un.d_val;
+                break;
             case DT_RELAENT:
                 relent_size = d->d_un.d_val;
                 break;
+#endif
             case DT_SYMENT:
                 sym_ent_size = d->d_un.d_val;
                 break;
@@ -198,14 +235,15 @@ static int patch_got_in_library(uintptr_t base_addr, const char* lib_path,
 
     // Find the symbol index by name
     int target_sym_idx = -1;
-    // We need to know the number of symbols. Estimate from string table offset.
-    // Walk symbols until we find our target.
-    // Use a reasonable upper bound.
     for (int i = 0; i < 65536; i++) {
-        ELF_SYM* sym = (ELF_SYM*)((uintptr_t)symtab + i * sym_ent_size);
-        if (sym->st_name == 0 && ELF_ST_BIND(sym->st_info) == STB_LOCAL) continue;
-        if (sym->st_name == 0) break;
+        VSym* sym = (VSym*)((uintptr_t)symtab + i * sym_ent_size);
+        if (sym->st_name == 0) {
+            // Check if we've gone past the dynamic symbols
+            if (ELF64_ST_BIND(sym->st_info) == STB_LOCAL && i > 0) break;
+            continue;
+        }
         const char* name = strtab + sym->st_name;
+        if (name[0] == '\0') break;
         if (strcmp(name, symbol_name) == 0) {
             target_sym_idx = i;
             break;
@@ -217,33 +255,32 @@ static int patch_got_in_library(uintptr_t base_addr, const char* lib_path,
         return -1;
     }
 
-    // Search .rel.plt / .rela.plt (JMPREL) for the symbol
+    // Search relocation sections for the symbol
     void** got_entry = nullptr;
     void* original = nullptr;
 
-    auto search_rel_section = [&](void* rel_start, size_t rel_sz, bool is_rela) -> bool {
-        size_t entry_size = is_rela ? sizeof(ELF_RELA) : sizeof(ELF_REL);
+    auto search_rel = [&](void* rel_start, size_t rel_sz) -> bool {
+        size_t entry_size = relent_size;
         size_t count = rel_sz / entry_size;
 
         for (size_t i = 0; i < count; i++) {
-            uintptr_t r_offset;
-            uintptr_t r_info;
+            uintptr_t r_offset, r_info;
 
             if (is_rela) {
-                ELF_RELA* r = (ELF_RELA*)((uintptr_t)rel_start + i * entry_size);
+                VRela* r = (VRela*)((uintptr_t)rel_start + i * entry_size);
                 r_offset = r->r_offset;
                 r_info = r->r_info;
             } else {
-                ELF_REL* r = (ELF_REL*)((uintptr_t)rel_start + i * entry_size);
+                VRel* r = (VRel*)((uintptr_t)rel_start + i * entry_size);
                 r_offset = r->r_offset;
                 r_info = r->r_info;
             }
 
-            if (ELF_R_TYPE(r_info) != R_JUMP_SLOT && ELF_R_TYPE(r_info) != R_GLOB_DAT) {
-                continue;
-            }
+            // Only patch JUMP_SLOT and GLOB_DAT relocations
+            unsigned int type = V_R_TYPE(r_info);
+            if (type != V_R_JUMP_SLOT && type != V_R_GLOB_DAT) continue;
 
-            if ((int)ELF_R_SYM(r_info) == target_sym_idx) {
+            if ((int)V_R_SYM(r_info) == target_sym_idx) {
                 got_entry = (void**)(base_addr + r_offset);
                 original = *got_entry;
                 return true;
@@ -252,15 +289,13 @@ static int patch_got_in_library(uintptr_t base_addr, const char* lib_path,
         return false;
     };
 
-    // Try JMPREL first (PLT entries)
+    // Try JMPREL (PLT) first, then REL/RELA (GLOB_DAT)
     bool found = false;
     if (jmprel && jmprel_size > 0) {
-        found = search_rel_section(jmprel, jmprel_size, relent_size > sizeof(ELF_REL));
+        found = search_rel(jmprel, jmprel_size);
     }
-
-    // Fall back to REL/RELA (GLOB_DAT entries)
     if (!found && rel && rel_size > 0) {
-        found = search_rel_section(rel, rel_size, relent_size > sizeof(ELF_REL));
+        found = search_rel(rel, rel_size);
     }
 
     if (!found || !got_entry) {
@@ -268,31 +303,43 @@ static int patch_got_in_library(uintptr_t base_addr, const char* lib_path,
         return -1;
     }
 
-    // Verify the GOT entry points to a valid address
     if (original == nullptr || original == new_func) {
         LOGD("patch_got: GOT entry for '%s' already hooked or null", symbol_name);
         return -1;
     }
 
-    // Save original and patch
+    // Save original
     if (orig_out) *orig_out = original;
 
     // Make GOT entry writable
-    uintptr_t page = (uintptr_t)got_entry & ~(sysconf(_SC_PAGESIZE) - 1);
-    if (mprotect((void*)page, sysconf(_SC_PAGESIZE), PROT_READ | PROT_WRITE) != 0) {
+    uintptr_t page_size = sysconf(_SC_PAGESIZE);
+    uintptr_t page = (uintptr_t)got_entry & ~(page_size - 1);
+    if (mprotect((void*)page, page_size, PROT_READ | PROT_WRITE) != 0) {
         LOGE("patch_got: mprotect failed for '%s': %s", symbol_name, strerror(errno));
         return -1;
     }
 
-    // Atomic write (void* is pointer-sized, naturally atomic on ARM/x86)
+    // Patch GOT entry
     *got_entry = new_func;
 
-    // Restore protection
-    mprotect((void*)page, sysconf(_SC_PAGESIZE), PROT_READ);
+    // Restore read-only protection
+    mprotect((void*)page, page_size, PROT_READ);
 
     LOGI("patch_got: hooked '%s' in %s: %p -> %p (GOT @ %p)",
          symbol_name, lib_path, original, new_func, got_entry);
     return 0;
+}
+
+// ── Helper: set orig_* pointer by name ─────────────────────────────
+
+static void set_orig_ptr(const std::string& name, void* orig) {
+    if (name == "open")        orig_open    = (int(*)(const char*, int, ...))orig;
+    else if (name == "openat") orig_openat  = (int(*)(int, const char*, int, ...))orig;
+    else if (name == "fopen")  orig_fopen   = (FILE*(*)(const char*, const char*))orig;
+    else if (name == "stat")   orig_stat    = (int(*)(const char*, struct stat*))orig;
+    else if (name == "access") orig_access  = (int(*)(const char*, int))orig;
+    else if (name == "ptrace") orig_ptrace  = (long(*)(int, pid_t, void*, void*))orig;
+    else if (name == "execve") orig_execve  = (int(*)(const char*, char* const[], char* const[]))orig;
 }
 
 // ── Hook Registration & Application ────────────────────────────────
@@ -314,7 +361,6 @@ int hook_register(const char* regex_lib, const char* func_name,
     entry.hook_func = hook_func;
     entry.orig_func = orig_func;
     entry.original_addr = nullptr;
-    entry.got_entry = nullptr;
     g_hooks.push_back(entry);
     LOGD("hook_register: %s -> %s", func_name, regex_lib);
     return 0;
@@ -332,53 +378,37 @@ int hook_refresh() {
 
         for (auto& map : maps) {
             if (!map.is_exec) continue;
-            if (map.path.find("[") != std::string::npos) continue; // skip [vdso], [stack], etc.
-            // Use fnmatch instead of regex for Android NDK compatibility
+            if (map.path.find("[") != std::string::npos) continue;
+            // Match library pattern using fnmatch
             if (fnmatch(entry.lib_pattern.c_str(), map.path.c_str(), 0) != 0 &&
                 map.path.find(".so") == std::string::npos) continue;
-
             // Skip our own library
             if (map.path.find("libvengine.so") != std::string::npos) continue;
 
+            // Find the library's base address (first mapping with offset 0)
+            uintptr_t base = find_library_base(map.path.c_str());
+            if (base == 0) continue;
+
             void* orig = nullptr;
-            int ret = patch_got_in_library(map.start, map.path.c_str(),
+            int ret = patch_got_in_library(base, map.path.c_str(),
                                            entry.func_name.c_str(),
                                            entry.hook_func, &orig);
             if (ret == 0 && orig) {
                 entry.original_addr = orig;
-                if (entry.orig_func) {
-                    *entry.orig_func = orig;
-                }
-                // Set the static orig_* variables for hook functions
-                if (entry.func_name == "open") orig_open = (int(*)(const char*, int, ...))orig;
-                else if (entry.func_name == "openat") orig_openat = (int(*)(int, const char*, int, ...))orig;
-                else if (entry.func_name == "fopen") orig_fopen = (FILE*(*)(const char*, const char*))orig;
-                else if (entry.func_name == "stat") orig_stat = (int(*)(const char*, struct stat*))orig;
-                else if (entry.func_name == "access") orig_access = (int(*)(const char*, int))orig;
-                else if (entry.func_name == "ptrace") orig_ptrace = (long(*)(int, pid_t, void*, void*))orig;
-                else if (entry.func_name == "execve") orig_execve = (int(*)(const char*, char* const[], char* const[]))orig;
+                if (entry.orig_func) *entry.orig_func = orig;
+                set_orig_ptr(entry.func_name, orig);
                 hooked_count++;
                 symbol_found = true;
-                // Don't break — hook in ALL matching libraries
             }
         }
 
         if (!symbol_found) {
-            // Try dlsym fallback for libc functions
+            // dlsym fallback — gives us the address but can't patch GOT
             void* orig = dlsym(RTLD_DEFAULT, entry.func_name.c_str());
             if (orig) {
                 entry.original_addr = orig;
-                if (entry.orig_func) {
-                    *entry.orig_func = orig;
-                }
-                // Also set the static orig_* variables in hook functions
-                if (entry.func_name == "open") orig_open = (int(*)(const char*, int, ...))orig;
-                else if (entry.func_name == "openat") orig_openat = (int(*)(int, const char*, int, ...))orig;
-                else if (entry.func_name == "fopen") orig_fopen = (FILE*(*)(const char*, const char*))orig;
-                else if (entry.func_name == "stat") orig_stat = (int(*)(const char*, struct stat*))orig;
-                else if (entry.func_name == "access") orig_access = (int(*)(const char*, int))orig;
-                else if (entry.func_name == "ptrace") orig_ptrace = (long(*)(int, pid_t, void*, void*))orig;
-                else if (entry.func_name == "execve") orig_execve = (int(*)(const char*, char* const[], char* const[]))orig;
+                if (entry.orig_func) *entry.orig_func = orig;
+                set_orig_ptr(entry.func_name, orig);
                 LOGD("hook_refresh: dlsym fallback for %s = %p (no GOT patch)",
                      entry.func_name.c_str(), orig);
             }
@@ -393,21 +423,10 @@ int hook_refresh() {
 
 int hook_unhook_all() {
     std::lock_guard<std::mutex> lock(g_hooks_mutex);
-    // TODO: restore original GOT entries (need to save them)
     g_hooks_applied = false;
     LOGI("hook_unhook_all: hooks disabled");
     return 0;
 }
-
-// ── Original Function Pointers ─────────────────────────────────────
-
-static int (*orig_open)(const char*, int, ...) = nullptr;
-static int (*orig_openat)(int, const char*, int, ...) = nullptr;
-static FILE* (*orig_fopen)(const char*, const char*) = nullptr;
-static int (*orig_stat)(const char*, struct stat*) = nullptr;
-static int (*orig_access)(const char*, int) = nullptr;
-static long (*orig_ptrace)(int, pid_t, void*, void*) = nullptr;
-static int (*orig_execve)(const char*, char* const[], char* const[]) = nullptr;
 
 // ── Hooked Functions ───────────────────────────────────────────────
 
@@ -418,8 +437,8 @@ int hook_open(const char* pathname, int flags, ...) {
         pathname = redirected;
     }
     if (orig_open) return orig_open(pathname, flags);
-    // Fallback: use syscall
-    return syscall(__NR_open, pathname, flags);
+    // Fallback: use openat (available on all architectures)
+    return syscall(__NR_openat, AT_FDCWD, pathname, flags);
 }
 
 int hook_openat(int dirfd, const char* pathname, int flags, ...) {
@@ -462,7 +481,7 @@ long hook_ptrace(int request, pid_t pid, void* addr, void* data) {
     if (request == PTRACE_ATTACH) {
         LOGD("hook_ptrace: PTRACE_ATTACH pid=%d -> faking success", pid);
         memory_bridge_register_pid(pid);
-        return 0; // Fake success
+        return 0;
     }
     if (request == PTRACE_PEEKDATA) {
         long result = 0;
@@ -478,7 +497,6 @@ long hook_ptrace(int request, pid_t pid, void* addr, void* data) {
         LOGD("hook_ptrace: PTRACE_DETACH pid=%d -> faking success", pid);
         return 0;
     }
-    // For other requests, try real ptrace
     if (orig_ptrace) return orig_ptrace(request, pid, addr, data);
     return -1;
 }
