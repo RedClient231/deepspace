@@ -36,10 +36,6 @@ android {
 
     buildFeatures { viewBinding = true }
 
-    externalNativeBuild {
-        cmake { path = file("../native/CMakeLists.txt") }
-    }
-
     sourceSets {
         getByName("main") {
             jniLibs.srcDirs("src/main/jniLibs")

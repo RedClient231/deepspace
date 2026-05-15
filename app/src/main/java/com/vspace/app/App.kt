@@ -9,11 +9,12 @@ import com.vspace.engine.VirtualCore
 import com.vspace.engine.hook.BinderHook
 import com.vspace.engine.pm.LaunchConfig
 import com.vspace.engine.stub.PluginContext
+import java.io.File
 
 class App : Application() {
 
     companion object {
-        private const val TAG = "App"
+        private const val TAG = "DeepSpace"
         const val CHANNEL_ID = "deepspace_daemon"
         lateinit var instance: App
             private set
@@ -21,9 +22,35 @@ class App : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        instance = this
-        createNotificationChannel()
-        VirtualCore.get().init(this)
+
+        // Install global crash logger so we can see what dies
+        val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            Log.e(TAG, "FATAL CRASH on ${thread.name}: ${throwable.message}", throwable)
+            // Write to file so it survives the crash
+            try {
+                val crashFile = File(filesDir, "last_crash.txt")
+                crashFile.writeText(
+                    "Thread: ${thread.name}\n" +
+                    "Time: ${System.currentTimeMillis()}\n" +
+                    "Exception: ${throwable.javaClass.simpleName}\n" +
+                    "Message: ${throwable.message}\n" +
+                    "Stack:\n${Log.getStackTraceString(throwable)}"
+                )
+            } catch (_: Exception) {}
+            defaultHandler?.uncaughtException(thread, throwable)
+        }
+
+        try {
+            instance = this
+            createNotificationChannel()
+            Log.i(TAG, "App.onCreate: process=${getProcessNameCompat()}")
+            VirtualCore.get().init(this)
+            Log.i(TAG, "VirtualCore initialized OK")
+        } catch (e: Throwable) {
+            Log.e(TAG, "App.onCreate FAILED: ${e.message}", e)
+            // Don't rethrow — let the app survive with degraded functionality
+        }
 
         // Detect if we're running in a stub process (:p0, :p1, ... :p9).
         // If so, load the target app's environment and install hooks.
@@ -34,22 +61,28 @@ class App : Application() {
             val suffix = processName.substringAfterLast(":")
             if (suffix.startsWith("p") && suffix.length <= 3) {
                 Log.i(TAG, "Running in stub process $processName, loading target app environment")
-                loadStubEnvironment(":$suffix")
+                try {
+                    loadStubEnvironment(":$suffix")
+                } catch (e: Throwable) {
+                    Log.e(TAG, "loadStubEnvironment FAILED: ${e.message}", e)
+                }
             }
         }
     }
 
     /**
      * Get process name compatible with all Android versions.
-     * Android 9+ has Application.getProcessName(), older versions read /proc/self/cmdline.
      */
     private fun getProcessNameCompat(): String? {
-        return if (Build.VERSION.SDK_INT >= 28) {
-            getProcessName()
-        } else {
-            try {
+        return try {
+            if (Build.VERSION.SDK_INT >= 28) {
+                getProcessName()
+            } else {
                 java.io.File("/proc/self/cmdline").readText().trim('\u0000', ' ', '\t')
-            } catch (_: Exception) { null }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "getProcessName failed: ${e.message}")
+            null
         }
     }
 
@@ -76,7 +109,7 @@ class App : Application() {
                 apkPath,
                 codeCacheDir.absolutePath,
                 nativeLibDir,
-                classLoader.parent  // boot classloader → target can access Android framework + host app
+                classLoader.parent
             )
 
             // Create Resources for target APK
@@ -91,21 +124,6 @@ class App : Application() {
             PluginContext.setClassLoader(dexClassLoader)
             PluginContext.setResources(targetResources)
             Log.d(TAG, "PluginContext populated for $processSuffix")
-
-            // Register IO redirect for this package
-            try {
-                val ioRedirectInit = com.vspace.engine.hook.BinderHook::class.java
-                // Use native IO redirect
-                com.vspace.engine.VirtualCore.get()
-                // Register the package for path redirection
-                if (dataDir != null) {
-                    // This is done via native io_redirect_add_package
-                    // but we pass it through the data path init
-                    Log.d(TAG, "IO redirect will handle ${config.targetPkg} -> $dataDir")
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "IO redirect registration failed (non-fatal): ${e.message}")
-            }
 
             // Install BinderHook for system service interception
             try {

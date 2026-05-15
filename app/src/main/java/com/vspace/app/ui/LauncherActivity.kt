@@ -1,8 +1,8 @@
 package com.vspace.app.ui
 
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.os.Bundle
+import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -24,56 +24,98 @@ import kotlinx.coroutines.withContext
 
 class LauncherActivity : AppCompatActivity() {
 
-    private lateinit var binding: ActivityLauncherBinding
-    private lateinit var adapter: AppListAdapter
+    companion object {
+        private const val TAG = "DeepSpace"
+    }
+
+    private var binding: ActivityLauncherBinding? = null
+    private var adapter: AppListAdapter? = null
     private val apps = mutableListOf<VirtualAppInfo>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        binding = ActivityLauncherBinding.inflate(layoutInflater)
-        setContentView(binding.root)
 
-        setupToolbar()
-        setupRecyclerView()
-        setupFab()
-        loadApps()
+        try {
+            Log.d(TAG, "LauncherActivity.onCreate start")
+
+            binding = ActivityLauncherBinding.inflate(layoutInflater)
+            setContentView(binding!!.root)
+
+            setupToolbar()
+            setupRecyclerView()
+            setupFab()
+            loadApps()
+
+            Log.d(TAG, "LauncherActivity.onCreate OK")
+        } catch (e: Throwable) {
+            Log.e(TAG, "LauncherActivity.onCreate FAILED: ${e.message}", e)
+            // Show a basic error view instead of crashing
+            try {
+                setContentView(android.widget.TextView(this).apply {
+                    text = "DeepSpace Error:\n${e.message}\n\nCheck logcat for details"
+                    setPadding(32, 32, 32, 32)
+                    setTextSize(14f)
+                    setTextColor(android.graphics.Color.WHITE)
+                    setBackgroundColor(android.graphics.Color.parseColor("#121225"))
+                })
+            } catch (_: Throwable) {
+                // If even that fails, just finish
+                finish()
+            }
+        }
     }
 
     override fun onResume() {
         super.onResume()
-        loadApps()
+        try {
+            loadApps()
+        } catch (e: Exception) {
+            Log.e(TAG, "loadApps in onResume failed: ${e.message}")
+        }
+    }
+
+    override fun onDestroy() {
+        binding = null
+        adapter = null
+        super.onDestroy()
     }
 
     private fun setupToolbar() {
-        setSupportActionBar(binding.toolbar)
+        val b = binding ?: return
+        setSupportActionBar(b.toolbar)
         supportActionBar?.title = "DeepSpace"
     }
 
     private fun setupRecyclerView() {
+        val b = binding ?: return
         adapter = AppListAdapter(
             apps,
             onClick = { app -> launchApp(app) },
             onLongClick = { app -> showAppOptions(app) }
         )
-        binding.recyclerView.layoutManager = GridLayoutManager(this, 4)
-        binding.recyclerView.adapter = adapter
+        b.recyclerView.layoutManager = GridLayoutManager(this, 4)
+        b.recyclerView.adapter = adapter
     }
 
     private fun setupFab() {
-        binding.fab.setOnClickListener {
+        binding?.fab?.setOnClickListener {
             startActivity(Intent(this, InstallActivity::class.java))
         }
     }
 
     private fun loadApps() {
         lifecycleScope.launch {
-            val installed = withContext(Dispatchers.IO) {
-                VirtualCore.get().getInstalledApps()
+            try {
+                val installed = withContext(Dispatchers.IO) {
+                    VirtualCore.get().getInstalledApps()
+                }
+                apps.clear()
+                apps.addAll(installed)
+                adapter?.notifyDataSetChanged()
+                binding?.emptyView?.visibility = if (apps.isEmpty()) View.VISIBLE else View.GONE
+            } catch (e: Exception) {
+                Log.e(TAG, "loadApps failed: ${e.message}", e)
             }
-            apps.clear()
-            apps.addAll(installed)
-            adapter.notifyDataSetChanged()
-            binding.emptyView.visibility = if (apps.isEmpty()) View.VISIBLE else View.GONE
         }
     }
 
@@ -92,13 +134,17 @@ class LauncherActivity : AppCompatActivity() {
 
     private fun launchApp(app: VirtualAppInfo) {
         Toast.makeText(this, "Launching ${app.name}...", Toast.LENGTH_SHORT).show()
-        // MUST launch on main thread — startActivity requires it
         lifecycleScope.launch {
-            val result = withContext(Dispatchers.IO) {
-                VirtualCore.get().launchApp(this@LauncherActivity, app.packageName)
-            }
-            if (!result) {
-                Toast.makeText(this@LauncherActivity, "Failed to launch ${app.name}", Toast.LENGTH_LONG).show()
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    VirtualCore.get().launchApp(this@LauncherActivity, app.packageName)
+                }
+                if (!result) {
+                    Toast.makeText(this@LauncherActivity, "Failed to launch ${app.name}", Toast.LENGTH_LONG).show()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "launchApp failed: ${e.message}", e)
+                Toast.makeText(this@LauncherActivity, "Launch error: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -109,8 +155,12 @@ class LauncherActivity : AppCompatActivity() {
             .setMessage("This will remove the app and all its data from the virtual space.")
             .setPositiveButton("Uninstall") { _, _ ->
                 lifecycleScope.launch(Dispatchers.IO) {
-                    VirtualCore.get().uninstallApp(app.packageName)
-                    withContext(Dispatchers.Main) { loadApps() }
+                    try {
+                        VirtualCore.get().uninstallApp(app.packageName)
+                        withContext(Dispatchers.Main) { loadApps() }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "uninstall failed: ${e.message}", e)
+                    }
                 }
             }
             .setNegativeButton("Cancel", null)

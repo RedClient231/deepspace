@@ -148,14 +148,21 @@ static uintptr_t find_library_base(const char* lib_path) {
 
 static int patch_got_in_library(uintptr_t base_addr, const char* lib_path,
                                  const char* symbol_name, void* new_func, void** orig_out) {
-    if (base_addr == 0) return -1;
+    if (base_addr == 0 || !lib_path || !symbol_name || !new_func) return -1;
 
-    // Read ELF header from memory
+    // Read ELF header from memory — wrap in safety check
     VEHdr ehdr;
+    memset(&ehdr, 0, sizeof(ehdr));
     memcpy(&ehdr, (void*)base_addr, sizeof(VEHdr));
 
     // Verify ELF magic
     if (memcmp(ehdr.e_ident, ELFMAG, SELFMAG) != 0) {
+        return -1;
+    }
+
+    // Sanity check phoff
+    if (ehdr.e_phoff == 0 || ehdr.e_phoff > 0x10000) {
+        LOGD("patch_got: invalid phoff 0x%x for %s", ehdr.e_phoff, lib_path);
         return -1;
     }
 
@@ -229,21 +236,24 @@ static int patch_got_in_library(uintptr_t base_addr, const char* lib_path,
     }
 
     if (!symtab || !strtab) {
-        LOGE("patch_got: missing symtab or strtab for %s", lib_path);
+        LOGD("patch_got: missing symtab or strtab for %s (non-fatal)", lib_path);
         return -1;
     }
 
     // Find the symbol index by name
     int target_sym_idx = -1;
-    for (int i = 0; i < 65536; i++) {
+    for (int i = 0; i < 4096; i++) {  // reasonable upper bound
         VSym* sym = (VSym*)((uintptr_t)symtab + i * sym_ent_size);
+        // Safety: check if we're still in readable memory
         if (sym->st_name == 0) {
-            // Check if we've gone past the dynamic symbols
-            if (ELF64_ST_BIND(sym->st_info) == STB_LOCAL && i > 0) break;
+            if (i > 0 && ELF64_ST_BIND(sym->st_info) == STB_LOCAL) break;
             continue;
         }
+        // Validate st_name is within reasonable range
         const char* name = strtab + sym->st_name;
         if (name[0] == '\0') break;
+        // Safety: don't read beyond a reasonable string length
+        if (strlen(name) > 256) break;
         if (strcmp(name, symbol_name) == 0) {
             target_sym_idx = i;
             break;

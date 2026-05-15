@@ -32,14 +32,21 @@ class VirtualCore private constructor() {
 
     fun init(context: Context) {
         this.context = context.applicationContext
-        ensureDirectories()
-        vpm.init(context)
+        try {
+            ensureDirectories()
+            vpm.init(context)
+        } catch (e: Exception) {
+            Log.e(TAG, "ensureDirectories/vpm.init failed: ${e.message}", e)
+        }
         // Load native library for hooking
         try {
             System.loadLibrary("vengine")
             nativeInit(context.filesDir.absolutePath)
+            Log.i(TAG, "Native engine loaded and initialized")
         } catch (e: UnsatisfiedLinkError) {
             Log.w(TAG, "Native engine not available, running in pure-JVM mode", e)
+        } catch (e: Exception) {
+            Log.w(TAG, "Native init failed: ${e.message}", e)
         }
     }
 
