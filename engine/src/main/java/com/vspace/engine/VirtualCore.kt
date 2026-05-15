@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.util.Log
 import com.vspace.engine.ipc.DaemonServer
 import com.vspace.engine.model.VirtualAppInfo
+import com.vspace.engine.pm.LaunchConfig
 import com.vspace.engine.pm.VPackageManager
 import java.io.File
 
@@ -121,17 +122,28 @@ class VirtualCore private constructor() {
     // ── App Launch ──────────────────────────────────────────────────
 
     fun launchApp(context: Context, packageName: String): Boolean {
+        val ctx = this.context ?: context
         val app = vpm.getApp(packageName) ?: return false
-        val stubPkg = "com.vspace.stub${app.stubProcessIndex}"
+        val stubIndex = app.stubProcessIndex
+        val stubPkg = "com.vspace.stub$stubIndex"
+        val stubClass = "com.vspace.engine.stub.StubActivity$stubIndex"
+
+        // Write launch config so StubApp can read it
+        LaunchConfig.write(
+            ctx,
+            processName = ":p$stubIndex",
+            targetPkg = packageName,
+            targetApk = app.apkPath,
+            targetData = app.dataDir
+        )
+
         val intent = Intent().apply {
-            setClassName(stubPkg, "com.vspace.stub.StubActivity")
-            putExtra("target_pkg", packageName)
-            putExtra("target_apk", app.apkPath)
-            putExtra("target_data", app.dataDir)
+            setClassName(stubPkg, stubClass)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         try {
             context.startActivity(intent)
+            Log.i(TAG, "Launched $packageName via $stubPkg/$stubClass")
             return true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to launch $packageName", e)

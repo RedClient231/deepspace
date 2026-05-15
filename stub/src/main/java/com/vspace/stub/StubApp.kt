@@ -8,22 +8,19 @@ import android.content.res.Resources
 import android.util.Log
 import dalvik.system.DexClassLoader
 import com.vspace.engine.hook.BinderHook
+import com.vspace.engine.pm.LaunchConfig
 
 /**
  * Stub Application that loads cloned apps dynamically.
- * Each stub process (:p0, :p1, ... :pN) runs this class,
- * which initializes the virtual engine hooks and loads
- * the target app's APK.
+ * Each stub process (:p0, :p1, ... :pN) runs this class.
+ * 
+ * Reads launch config from file (written by VirtualCore before launch)
+ * to determine which target app to load.
  */
 class StubApp : Application() {
 
     companion object {
         private const val TAG = "StubApp"
-
-        // Set via intent extras before the app loads
-        var targetPackage: String? = null
-        var targetApkPath: String? = null
-        var targetDataDir: String? = null
     }
 
     private var targetClassLoader: ClassLoader? = null
@@ -32,7 +29,8 @@ class StubApp : Application() {
 
     override fun attachBaseContext(base: Context?) {
         super.attachBaseContext(base)
-        Log.i(TAG, "attachBaseContext: process=${getProcessName()} pid=${android.os.Process.myPid()}")
+        val processName = getProcessName() ?: ""
+        Log.i(TAG, "attachBaseContext: process=$processName pid=${android.os.Process.myPid()}")
 
         // Load native hooks
         try {
@@ -53,13 +51,24 @@ class StubApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        Log.i(TAG, "onCreate: stub app started")
 
-        // If target info is set, load the target app
-        val pkg = targetPackage
-        val apk = targetApkPath
-        if (pkg != null && apk != null) {
-            loadTargetApp(pkg, apk, targetDataDir)
+        val processName = getProcessName() ?: ""
+        Log.i(TAG, "onCreate: process=$processName")
+
+        // Extract the :pN suffix from process name
+        val processSuffix = if (processName.contains(":")) {
+            processName.substringAfterLast(":")
+        } else {
+            ""
+        }
+
+        // Read launch config written by VirtualCore
+        val config = LaunchConfig.read(this, ":$processSuffix")
+        if (config != null) {
+            Log.i(TAG, "Found launch config: pkg=${config.targetPkg} apk=${config.targetApk}")
+            loadTargetApp(config.targetPkg, config.targetApk, config.targetData)
+        } else {
+            Log.w(TAG, "No launch config found for process :$processSuffix")
         }
     }
 
@@ -101,9 +110,9 @@ class StubApp : Application() {
 
                 // Call onCreate
                 targetApplication!!.onCreate()
-                Log.i(TAG, "Target app loaded: $packageName")
+                Log.i(TAG, "Target app loaded successfully: $packageName")
             } else {
-                Log.w(TAG, "No Application class found in target APK")
+                Log.w(TAG, "No Application class found in target APK, loading anyway")
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to load target app: $packageName", e)
