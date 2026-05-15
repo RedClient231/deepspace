@@ -1,15 +1,18 @@
 package com.vspace.engine.stub
 
 import android.app.Activity
+import android.app.Application
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.Resources
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import com.vspace.engine.pm.LaunchConfig
+import java.io.File
 
 /**
  * Stub activity that serves as the container for cloned apps.
@@ -22,6 +25,16 @@ open class StubActivity : Activity() {
 
     companion object {
         private const val TAG = "StubActivity"
+
+        private fun getMyProcessName(): String {
+            return if (Build.VERSION.SDK_INT >= 28) {
+                Application.getProcessName()
+            } else {
+                // Fallback for older API
+                val cmd = File("/proc/self/cmdline").readText().trim()
+                cmd
+            }
+        }
     }
 
     private var targetPackageName: String? = null
@@ -29,8 +42,7 @@ open class StubActivity : Activity() {
     override fun attachBaseContext(newBase: Context?) {
         super.attachBaseContext(newBase)
 
-        // Read config based on process name
-        val processName = getProcessName() ?: ""
+        val processName = getMyProcessName()
         val processSuffix = if (processName.contains(":")) {
             processName.substringAfterLast(":")
         } else {
@@ -63,11 +75,16 @@ open class StubActivity : Activity() {
             val classLoader = classLoaderMethod.invoke(app) as? ClassLoader
 
             if (classLoader == null) {
-                Log.e(TAG, "StubApp has no target classloader, falling back to direct load")
-                // Fallback: load directly (StubApp may not have loaded yet)
-                val config = LaunchConfig.read(this, ":${getProcessName()?.substringAfterLast(":")}")
+                Log.e(TAG, "StubApp has no target classloader, using fallback")
+                val processName = getMyProcessName()
+                val processSuffix = if (processName.contains(":")) {
+                    processName.substringAfterLast(":")
+                } else {
+                    ""
+                }
+                val config = LaunchConfig.read(this, ":$processSuffix")
                 if (config != null) {
-                    launchFromConfig(config.targetApk, config.targetPkg)
+                    launchFromConfig(config.targetApk)
                 }
                 finish()
                 return
@@ -89,14 +106,11 @@ open class StubActivity : Activity() {
             var launcherActivity: String? = null
             if (activities != null) {
                 for (act in activities) {
-                    val intentFilters = act.metaData // not directly available
-                    // Try the first exported activity
                     if (act.exported) {
                         launcherActivity = act.name
                         break
                     }
                 }
-                // Fallback: use first activity
                 if (launcherActivity == null && activities.isNotEmpty()) {
                     launcherActivity = activities[0].name
                 }
@@ -123,7 +137,7 @@ open class StubActivity : Activity() {
         }
     }
 
-    private fun launchFromConfig(apkPath: String, targetPkg: String) {
+    private fun launchFromConfig(apkPath: String) {
         try {
             val classLoader = dalvik.system.DexClassLoader(
                 apkPath,
@@ -162,7 +176,7 @@ open class StubActivity : Activity() {
 
     private fun getApkPath(packageName: String): String? {
         val apkDir = File(filesDir.parentFile, "virtual_space/apks")
-        val apkFile = java.io.File(apkDir, "$packageName.apk")
+        val apkFile = File(apkDir, "$packageName.apk")
         return if (apkFile.exists()) apkFile.absolutePath else null
     }
 }

@@ -29,7 +29,7 @@ class StubApp : Application() {
 
     override fun attachBaseContext(base: Context?) {
         super.attachBaseContext(base)
-        val processName = getProcessName() ?: ""
+        val processName = if (android.os.Build.VERSION.SDK_INT >= 28) android.app.Application.getProcessName() else { try { java.io.File("/proc/self/cmdline").readText().trim() } catch (e: Exception) { "" } }
         Log.i(TAG, "attachBaseContext: process=$processName pid=${android.os.Process.myPid()}")
 
         // Load native hooks
@@ -52,7 +52,7 @@ class StubApp : Application() {
     override fun onCreate() {
         super.onCreate()
 
-        val processName = getProcessName() ?: ""
+        val processName = if (android.os.Build.VERSION.SDK_INT >= 28) android.app.Application.getProcessName() else { try { java.io.File("/proc/self/cmdline").readText().trim() } catch (e: Exception) { "" } }
         Log.i(TAG, "onCreate: process=$processName")
 
         // Extract the :pN suffix from process name
