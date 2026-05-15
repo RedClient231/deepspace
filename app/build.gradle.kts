@@ -5,12 +5,12 @@ plugins {
 
 android {
     namespace = "com.vspace.app"
-    compileSdk = 33
+    compileSdk = 34
 
     defaultConfig {
         applicationId = "com.fast.utils.helper"
         minSdk = 21
-        targetSdk = 33
+        targetSdk = 34
         versionCode = 1
         versionName = "1.0.0"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }

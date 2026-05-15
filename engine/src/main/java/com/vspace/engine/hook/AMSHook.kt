@@ -27,7 +27,7 @@ class AMSHook : InvocationHandler {
         val name = method?.name ?: return null
 
         return when (name) {
-            "startActivity" -> handleStartActivity(method, args)
+            "startActivity" -> handleStartActivity(method, args?.copyOf())
             "startService" -> handleStartService(method, args)
             "sendBroadcast" -> handleSendBroadcast(method, args)
             "getRunningAppProcesses" -> handleGetRunningProcesses(method, args)
@@ -36,7 +36,7 @@ class AMSHook : InvocationHandler {
         }
     }
 
-    private fun handleStartActivity(method: Method, args: Array<out Any?>?): Any? {
+    private fun handleStartActivity(method: Method, args: Array<Any?>?): Any? {
         Log.d(TAG, "Intercepting startActivity")
         // Replace intent target with stub activity
         if (args != null && args.isNotEmpty()) {
