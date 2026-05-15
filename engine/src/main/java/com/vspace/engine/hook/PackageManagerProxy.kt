@@ -67,7 +67,7 @@ class PackageManagerProxy(private val original: IBinder) : IBinder {
         original.linkToDeath(recipient, flags)
     }
 
-    override fun unlinkToDeath(recipient: IBinder.DeathRecipient?, flags: Int): Boolean {
+    override fun unlinkToDeath(recipient: IBinder.DeathRecipient, flags: Int): Boolean {
         return original.unlinkToDeath(recipient, flags)
     }
 
