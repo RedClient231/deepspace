@@ -40,12 +40,11 @@ class StubApp : Application() {
             Log.w(TAG, "Failed to load libvengine.so", e)
         }
 
-        // Install Binder hooks
+        // Install Binder hooks (currently non-functional, see BinderHook)
         try {
             BinderHook.install()
-            Log.i(TAG, "Binder hooks installed")
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to install binder hooks", e)
+            Log.w(TAG, "BinderHook.install() failed", e)
         }
     }
 

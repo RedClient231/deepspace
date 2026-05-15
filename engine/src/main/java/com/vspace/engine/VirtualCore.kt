@@ -104,11 +104,18 @@ class VirtualCore private constructor() {
 
     fun uninstallApp(packageName: String): Boolean {
         val app = vpm.getApp(packageName) ?: return false
-        // Remove data
-        File(app.dataDir).deleteRecursively()
-        // Remove APK
-        File(app.apkPath).delete()
-        // Free process slot
+        try {
+            val dataDir = File(app.dataDir)
+            if (dataDir.exists()) dataDir.deleteRecursively()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to delete data dir for $packageName", e)
+        }
+        try {
+            val apkFile = File(app.apkPath)
+            if (apkFile.exists()) apkFile.delete()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to delete APK for $packageName", e)
+        }
         vpm.freeProcessSlot(app.stubProcessIndex)
         vpm.removeApp(packageName)
         Log.i(TAG, "Uninstalled $packageName from virtual space")
@@ -123,12 +130,31 @@ class VirtualCore private constructor() {
 
     fun launchApp(context: Context, packageName: String): Boolean {
         val ctx = this.context ?: context
-        val app = vpm.getApp(packageName) ?: return false
+        val app = vpm.getApp(packageName) ?: run {
+            Log.e(TAG, "App not installed: $packageName")
+            return false
+        }
+
+        // Patch 7: verify APK exists before launch
+        val apkFile = File(app.apkPath)
+        if (!apkFile.exists()) {
+            Log.e(TAG, "APK file missing for $packageName: ${app.apkPath}")
+            vpm.removeApp(packageName)
+            return false
+        }
+
+        // Patch 7: verify stub slot is within declared proxy range
         val stubIndex = app.stubProcessIndex
-        val stubPkg = "com.vspace.stub$stubIndex"
+        if (stubIndex < 0 || stubIndex > 9) {
+            Log.e(TAG, "Invalid stub slot $stubIndex for $packageName (max 9)")
+            return false
+        }
+
+        // Patch 2: Use host package, not the stub package
+        val hostPkg = ctx.packageName
         val stubClass = "com.vspace.engine.stub.StubActivity$stubIndex"
 
-        // Write launch config so StubApp can read it
+        // Write launch config as fallback (Patch 3: extras are primary)
         LaunchConfig.write(
             ctx,
             processName = ":p$stubIndex",
@@ -138,15 +164,20 @@ class VirtualCore private constructor() {
         )
 
         val intent = Intent().apply {
-            setClassName(stubPkg, stubClass)
+            // Patch 2: point to host package proxy activities
+            setClassName(hostPkg, stubClass)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            // Patch 3: pass config via intent extras (primary channel)
+            putExtra("target_pkg", packageName)
+            putExtra("target_apk", app.apkPath)
+            putExtra("target_data", app.dataDir)
         }
         try {
             context.startActivity(intent)
-            Log.i(TAG, "Launched $packageName via $stubPkg/$stubClass")
+            Log.i(TAG, "Launched $packageName via $hostPkg/$stubClass (slot $stubIndex)")
             return true
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to launch $packageName", e)
+            Log.e(TAG, "Failed to launch $packageName via $hostPkg/$stubClass", e)
             return false
         }
     }
@@ -169,27 +200,52 @@ class VirtualCore private constructor() {
 
     // ── Native Lib Extraction ───────────────────────────────────────
 
+    /**
+     * Patch 4: Extract native libraries for the current device ABI
+     * directly into dataDir/lib/ (not dataDir/lib/<abi>/).
+     * DexClassLoader needs a directory containing loadable .so files.
+     */
     private fun extractNativeLibs(apkFile: File, dataDir: File) {
         try {
             val libDir = File(dataDir, "lib")
             libDir.mkdirs()
+
+            // Find the best matching ABI from the APK
             val zipFile = java.util.zip.ZipFile(apkFile)
             val entries = zipFile.entries()
+            val abiEntries = mutableMapOf<String, MutableList<Pair<String, java.io.InputStream>>>()
+
             while (entries.hasMoreElements()) {
                 val entry = entries.nextElement()
                 if (entry.name.startsWith("lib/") && entry.name.endsWith(".so")) {
-                    val archDir = entry.name.substringAfter("lib/").substringBefore("/")
-                    val fileName = entry.name.substringAfterLast("/")
-                    val targetDir = File(libDir, archDir)
-                    targetDir.mkdirs()
-                    zipFile.getInputStream(entry).use { input ->
-                        File(targetDir, fileName).outputStream().use { output ->
-                            input.copyTo(output)
-                        }
+                    val abi = entry.name.substringAfter("lib/").substringBefore("/")
+                    if (!abiEntries.containsKey(abi)) {
+                        abiEntries[abi] = mutableListOf()
                     }
+                    // Read into memory since zip stream closes
+                    val bytes = zipFile.getInputStream(entry).readBytes()
+                    val fileName = entry.name.substringAfterLast("/")
+                    abiEntries[abi]!!.add(fileName to bytes.inputStream())
                 }
             }
             zipFile.close()
+
+            // Pick the best ABI for this device
+            for (abi in android.os.Build.SUPPORTED_ABIS) {
+                val libs = abiEntries[abi]
+                if (libs != null && libs.isNotEmpty()) {
+                    // Patch 4: extract directly to dataDir/lib/, not dataDir/lib/<abi>/
+                    for ((fileName, stream) in libs) {
+                        stream.use { input ->
+                            File(libDir, fileName).outputStream().use { output ->
+                                input.copyTo(output)
+                            }
+                        }
+                    }
+                    Log.i(TAG, "Extracted ${libs.size} native libs for ABI $abi to ${libDir.absolutePath}")
+                    break
+                }
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to extract native libs", e)
         }

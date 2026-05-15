@@ -17,4 +17,3 @@ dependencyResolutionManagement {
 rootProject.name = "DeepSpace"
 include(":app")
 include(":engine")
-include(":stub")

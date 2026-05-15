@@ -42,6 +42,18 @@
             android:exported="false"
             android:theme="@style/Theme.DeepSpace" />
 
+        <!-- Proxy activities for virtual app isolation (Option A: single-package) -->
+        <activity android:name="com.vspace.engine.stub.StubActivity0" android:exported="false" android:process=":p0" android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+        <activity android:name="com.vspace.engine.stub.StubActivity1" android:exported="false" android:process=":p1" android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+        <activity android:name="com.vspace.engine.stub.StubActivity2" android:exported="false" android:process=":p2" android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+        <activity android:name="com.vspace.engine.stub.StubActivity3" android:exported="false" android:process=":p3" android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+        <activity android:name="com.vspace.engine.stub.StubActivity4" android:exported="false" android:process=":p4" android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+        <activity android:name="com.vspace.engine.stub.StubActivity5" android:exported="false" android:process=":p5" android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+        <activity android:name="com.vspace.engine.stub.StubActivity6" android:exported="false" android:process=":p6" android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+        <activity android:name="com.vspace.engine.stub.StubActivity7" android:exported="false" android:process=":p7" android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+        <activity android:name="com.vspace.engine.stub.StubActivity8" android:exported="false" android:process=":p8" android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+        <activity android:name="com.vspace.engine.stub.StubActivity9" android:exported="false" android:process=":p9" android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
         <service
             android:name=".utils.DaemonService"
             android:exported="false"

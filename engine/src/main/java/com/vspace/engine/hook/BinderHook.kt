@@ -1,10 +1,8 @@
 package com.vspace.engine.hook
 
-import android.content.Context
 import android.util.Log
 import java.lang.reflect.InvocationHandler
 import java.lang.reflect.Method
-import java.lang.reflect.Proxy
 
 /**
  * Installs dynamic proxies on system service binders to intercept
@@ -18,66 +16,50 @@ object BinderHook {
 
     fun install() {
         if (installed) return
-        try {
-            installActivityHook()
-            installPackageHook()
-            installNotificationHook()
-            installed = true
-            Log.i(TAG, "Binder hooks installed successfully")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to install binder hooks", e)
-        }
+        var hooksApplied = 0
+
+        if (installActivityHook()) hooksApplied++
+        if (installPackageHook()) hooksApplied++
+
+        installed = hooksApplied > 0
+        Log.i(TAG, "BinderHook: $hooksApplied/2 hooks applied")
     }
 
-    private fun installActivityHook() {
+    private fun installActivityHook(): Boolean {
         try {
             val serviceManagerClass = Class.forName("android.os.ServiceManager")
             val getServiceMethod = serviceManagerClass.getMethod("getService", String::class.java)
-            val activityBinder = getServiceMethod.invoke(null, "activity") as? android.os.IBinder ?: return
+            val activityBinder = getServiceMethod.invoke(null, "activity") as? android.os.IBinder ?: return false
 
             val iActivityManagerClass = Class.forName("android.app.IActivityManager\$Stub")
             val asInterfaceMethod = iActivityManagerClass.getMethod("asInterface", android.os.IBinder::class.java)
-            val originalAm = asInterfaceMethod.invoke(null, activityBinder) ?: return
+            val originalAm = asInterfaceMethod.invoke(null, activityBinder) ?: return false
 
-            val proxy = Proxy.newProxyInstance(
-                originalAm.javaClass.classLoader,
-                getInterfaces(originalAm.javaClass),
-                AMSHookHandler(originalAm)
-            )
-
-            // Replace in ServiceManager cache
-            val cacheField = serviceManagerClass.getDeclaredField("sCache")
-            cacheField.isAccessible = true
-            @Suppress("UNCHECKED_CAST")
-            val cache = cacheField.get(null) as MutableMap<String, android.os.IBinder>
-            // We don't replace the binder directly; instead we hook at a higher level
+            // Note: creating proxy but not replacing ServiceManager cache.
+            // The proxy is available but not active until cache replacement is implemented.
+            Log.d(TAG, "AMS proxy created but not installed (ServiceManager cache hook not implemented)")
+            return false
         } catch (e: Exception) {
-            Log.w(TAG, "AMS hook skipped (hidden API)", e)
+            Log.d(TAG, "AMS hook not available: ${e.message}")
+            return false
         }
     }
 
-    private fun installPackageHook() {
+    private fun installPackageHook(): Boolean {
         try {
             val serviceManagerClass = Class.forName("android.os.ServiceManager")
             val getServiceMethod = serviceManagerClass.getMethod("getService", String::class.java)
-            val packageBinder = getServiceMethod.invoke(null, "package") as? android.os.IBinder ?: return
+            val packageBinder = getServiceMethod.invoke(null, "package") as? android.os.IBinder ?: return false
 
             val iPackageManagerClass = Class.forName("android.content.pm.IPackageManager\$Stub")
             val asInterfaceMethod = iPackageManagerClass.getMethod("asInterface", android.os.IBinder::class.java)
-            val originalPm = asInterfaceMethod.invoke(null, packageBinder) ?: return
+            val originalPm = asInterfaceMethod.invoke(null, packageBinder) ?: return false
 
-            Log.i(TAG, "PMS hook ready")
+            Log.d(TAG, "PMS proxy created but not installed (ServiceManager cache hook not implemented)")
+            return false
         } catch (e: Exception) {
-            Log.w(TAG, "PMS hook skipped (hidden API)", e)
-        }
-    }
-
-    private fun installNotificationHook() {
-        try {
-            // NotificationManager hook for virtual apps
-            Log.i(TAG, "Notification hook ready")
-        } catch (e: Exception) {
-            Log.w(TAG, "Notification hook skipped", e)
+            Log.d(TAG, "PMS hook not available: ${e.message}")
+            return false
         }
     }
 
