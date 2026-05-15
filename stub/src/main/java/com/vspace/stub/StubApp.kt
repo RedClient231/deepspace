@@ -9,11 +9,12 @@ import android.util.Log
 import dalvik.system.DexClassLoader
 import com.vspace.engine.hook.BinderHook
 import com.vspace.engine.pm.LaunchConfig
+import com.vspace.engine.stub.PluginContext
 
 /**
  * Stub Application that loads cloned apps dynamically.
  * Each stub process (:p0, :p1, ... :pN) runs this class.
- * 
+ *
  * Reads launch config from file (written by VirtualCore before launch)
  * to determine which target app to load.
  */
@@ -77,18 +78,24 @@ class StubApp : Application() {
         try {
             // Create classloader for the target APK
             val nativeLibDir = if (dataDir != null) "$dataDir/lib" else null
-            targetClassLoader = DexClassLoader(
+            val dexClassLoader = DexClassLoader(
                 apkPath,
                 codeCacheDir.absolutePath,
                 nativeLibDir,
                 classLoader.parent
             )
+            targetClassLoader = dexClassLoader
 
             // Load target's resources
             val assetManager = AssetManager::class.java.newInstance()
             val addAssetPath = assetManager.javaClass.getMethod("addAssetPath", String::class.java)
             addAssetPath.invoke(assetManager, apkPath)
             targetResources = Resources(assetManager, resources.displayMetrics, resources.configuration)
+
+            // ── Store in PluginContext so StubActivity can reuse them ──
+            PluginContext.setClassLoader(dexClassLoader)
+            PluginContext.setResources(targetResources!!)
+            Log.d(TAG, "Stored ClassLoader and Resources in PluginContext")
 
             // Parse the target's manifest to find its Application class
             val pm = packageManager

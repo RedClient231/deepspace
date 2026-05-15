@@ -26,6 +26,10 @@ import java.lang.reflect.Method
  * StubActivity IS the real Android Activity registered in the host manifest.
  * It loads the target Activity class reflectively, wires it up via Activity.attach(),
  * and delegates lifecycle calls to it.
+ *
+ * FIX: Now reuses the ClassLoader and Resources already loaded by StubApp
+ * via PluginContext, instead of creating a second DexClassLoader.
+ * This eliminates class identity conflicts between StubApp and StubActivity.
  */
 open class StubActivity : Activity() {
 
@@ -55,26 +59,39 @@ open class StubActivity : Activity() {
         Log.i(TAG, "Launching $targetPkg from $apkPath")
 
         try {
-            // 2. Create ClassLoader for the target APK
-            // Use host classloader as parent so target can access Android framework + AndroidX
-            val nativeLibDir = computeNativeLibDir(dataDir)
-            val classLoader = DexClassLoader(
-                apkPath,
-                codeCacheDir.absolutePath,
-                nativeLibDir,
-                javaClass.classLoader  // host classloader, NOT boot classloader
-            )
+            // 2. Get ClassLoader — prefer the one StubApp already loaded
+            val classLoader: ClassLoader = PluginContext.getClassLoader()
+                ?: run {
+                    // Fallback: create one if StubApp didn't set it (shouldn't happen)
+                    Log.w(TAG, "PluginContext has no ClassLoader, creating fallback")
+                    val nativeLibDir = computeNativeLibDir(dataDir)
+                    val cl = DexClassLoader(
+                        apkPath,
+                        codeCacheDir.absolutePath,
+                        nativeLibDir,
+                        javaClass.classLoader
+                    )
+                    PluginContext.setClassLoader(cl)
+                    cl
+                }
             targetClassLoader = classLoader
-            Log.d(TAG, "Created DexClassLoader for $targetPkg")
+            Log.d(TAG, "Using ClassLoader: ${if (PluginContext.getClassLoader() != null) "from PluginContext" else "fallback"}")
 
-            // 3. Load target's resources
-            val assetManager = AssetManager::class.java.newInstance()
-            val addAssetPath = assetManager.javaClass.getMethod("addAssetPath", String::class.java)
-            addAssetPath.invoke(assetManager, apkPath)
-            targetResources = Resources(assetManager, resources.displayMetrics, resources.configuration)
-            Log.d(TAG, "Loaded resources for $targetPkg")
+            // 3. Get Resources — prefer the one StubApp already loaded
+            val resources: Resources = PluginContext.getResources()
+                ?: run {
+                    Log.w(TAG, "PluginContext has no Resources, creating fallback")
+                    val assetManager = AssetManager::class.java.newInstance()
+                    val addAssetPath = assetManager.javaClass.getMethod("addAssetPath", String::class.java)
+                    addAssetPath.invoke(assetManager, apkPath)
+                    val res = Resources(assetManager, getResources().displayMetrics, getResources().configuration)
+                    PluginContext.setResources(res)
+                    res
+                }
+            targetResources = resources
+            Log.d(TAG, "Using Resources: ${if (PluginContext.getResources() != null) "from PluginContext" else "fallback"}")
 
-            // 4. Instantiate the target's Application class (if any)
+            // 4. Load target Application if StubApp hasn't already
             initTargetApplication(classLoader, apkPath, targetPkg, dataDir)
 
             // 5. Find the launcher activity
@@ -87,7 +104,7 @@ open class StubActivity : Activity() {
             }
             Log.d(TAG, "Launcher activity: $launcherName")
 
-            // 6. Instantiate the target Activity
+            // 6. Instantiate the target Activity using the shared ClassLoader
             val targetClass = classLoader.loadClass(launcherName)
             val target = targetClass.newInstance() as Activity
             targetActivity = target
@@ -111,6 +128,7 @@ open class StubActivity : Activity() {
 
     /**
      * Initialize the target APK's Application class.
+     * StubApp may have already done this — check before duplicating.
      */
     private fun initTargetApplication(classLoader: ClassLoader, apkPath: String, pkg: String, dataDir: String?) {
         try {
@@ -130,7 +148,7 @@ open class StubActivity : Activity() {
             app.onCreate()
             Log.i(TAG, "Target Application $appClassName initialized")
         } catch (e: Exception) {
-            Log.w(TAG, "Target Application init failed (non-fatal): ${e.message}")
+            Log.w(TAG, "Target Application init failed (non-fatal, may already be loaded by StubApp): ${e.message}")
         }
     }
 
@@ -250,7 +268,7 @@ open class StubActivity : Activity() {
             val pkgInfo = pm.getPackageArchiveInfo(apkPath, PackageManager.GET_ACTIVITIES) ?: return null
             val activities = pkgInfo.activities ?: return null
 
-            // First exported activity (most common launcher pattern)
+            // Find activity with MAIN/LAUNCHER intent filter
             for (act in activities) {
                 if (act.exported) return act.name
             }
@@ -283,6 +301,22 @@ open class StubActivity : Activity() {
 
     private fun Toast(msg: String) {
         android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_LONG).show()
+    }
+
+    // ── Resource & ClassLoader delegation ───────────────────────────
+    // These overrides ensure Android framework uses the target app's
+    // ClassLoader and Resources, not the host's.
+
+    override fun getResources(): Resources {
+        return targetResources ?: PluginContext.getResources() ?: super.getResources()
+    }
+
+    override fun getAssets(): android.content.res.AssetManager {
+        return targetResources?.assets ?: PluginContext.getResources()?.assets ?: super.getAssets()
+    }
+
+    override fun getClassLoader(): ClassLoader {
+        return targetClassLoader ?: PluginContext.getClassLoader() ?: super.getClassLoader()
     }
 
     // ── Lifecycle delegation ────────────────────────────────────────
@@ -368,19 +402,5 @@ open class StubActivity : Activity() {
             m.isAccessible = true
             m.invoke(targetActivity, requestCode, permissions, grantResults)
         } catch (_: Exception) {}
-    }
-
-    // ── Resource delegation ─────────────────────────────────────────
-
-    override fun getResources(): Resources {
-        return targetResources ?: super.getResources()
-    }
-
-    override fun getAssets(): android.content.res.AssetManager {
-        return targetResources?.assets ?: super.getAssets()
-    }
-
-    override fun getClassLoader(): ClassLoader {
-        return targetClassLoader ?: super.getClassLoader()
     }
 }
