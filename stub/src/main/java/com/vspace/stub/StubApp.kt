@@ -7,7 +7,7 @@ import android.content.res.AssetManager
 import android.content.res.Resources
 import android.util.Log
 import dalvik.system.DexClassLoader
-import com.vspace.engine.hook.BinderHook
+import com.vspace.engine.hook.ServiceManagerHook
 import com.vspace.engine.pm.LaunchConfig
 import com.vspace.engine.stub.PluginContext
 
@@ -41,11 +41,11 @@ class StubApp : Application() {
             Log.w(TAG, "Failed to load libvengine.so", e)
         }
 
-        // Install Binder hooks (currently non-functional, see BinderHook)
+        // Install ServiceManager hooks (replaces sCache entries)
         try {
-            BinderHook.install()
+            ServiceManagerHook.install()
         } catch (e: Exception) {
-            Log.w(TAG, "BinderHook.install() failed", e)
+            Log.w(TAG, "ServiceManagerHook.install() failed", e)
         }
     }
 

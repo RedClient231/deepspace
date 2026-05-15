@@ -6,7 +6,7 @@ import android.app.NotificationManager
 import android.os.Build
 import android.util.Log
 import com.vspace.engine.VirtualCore
-import com.vspace.engine.hook.BinderHook
+import com.vspace.engine.hook.ServiceManagerHook
 import com.vspace.engine.pm.LaunchConfig
 import com.vspace.engine.stub.PluginContext
 import java.io.File
@@ -125,12 +125,12 @@ class App : Application() {
             PluginContext.setResources(targetResources)
             Log.d(TAG, "PluginContext populated for $processSuffix")
 
-            // Install BinderHook for system service interception
+            // Install ServiceManager hooks (replaces sCache entries)
             try {
-                BinderHook.install()
-                Log.d(TAG, "BinderHook installed in stub process")
+                ServiceManagerHook.install()
+                Log.d(TAG, "ServiceManager hooks installed in stub process")
             } catch (e: Exception) {
-                Log.w(TAG, "BinderHook install failed (non-fatal): ${e.message}")
+                Log.w(TAG, "ServiceManager hook failed (non-fatal): ${e.message}")
             }
 
             // Install native hooks (GOT/PLT patching)

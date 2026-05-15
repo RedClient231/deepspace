@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.util.Log
+import com.vspace.engine.hook.HiddenApiBypass
 import com.vspace.engine.ipc.DaemonServer
 import com.vspace.engine.model.VirtualAppInfo
 import com.vspace.engine.pm.LaunchConfig
@@ -32,6 +33,15 @@ class VirtualCore private constructor() {
 
     fun init(context: Context) {
         this.context = context.applicationContext
+
+        // Bypass hidden API restrictions (must be before any hidden API access)
+        try {
+            HiddenApiBypass.bypass()
+            Log.i(TAG, "Hidden API bypass applied")
+        } catch (e: Exception) {
+            Log.w(TAG, "Hidden API bypass failed (non-fatal): ${e.message}")
+        }
+
         try {
             ensureDirectories()
             vpm.init(context)
