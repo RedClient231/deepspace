@@ -120,8 +120,10 @@ open class StubActivity : Activity() {
             Log.i(TAG, "✓ Target activity $launcherName launched successfully")
 
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to launch $targetPkg", e)
-            Toast("Launch failed: ${e.message}")
+            // e.message can be null (e.g. NullPointerException), use toString() for a useful message
+            val errorDetail = e.message ?: e.toString()
+            Log.e(TAG, "Failed to launch $targetPkg: $errorDetail", e)
+            Toast("Launch failed: $errorDetail")
             finish()
         }
     }
@@ -265,14 +267,48 @@ open class StubActivity : Activity() {
     private fun resolveLauncherActivity(apkPath: String, packageName: String): String? {
         try {
             val pm = packageManager
-            val pkgInfo = pm.getPackageArchiveInfo(apkPath, PackageManager.GET_ACTIVITIES) ?: return null
+            // GET_ACTIVITIES | GET_INTENT_FILTERS to get intent filter info
+            val pkgInfo = pm.getPackageArchiveInfo(
+                apkPath,
+                PackageManager.GET_ACTIVITIES or PackageManager.GET_META_DATA
+            ) ?: return null
             val activities = pkgInfo.activities ?: return null
 
-            // Find activity with MAIN/LAUNCHER intent filter
+            // Method 1: Find activity with MAIN/LAUNCHER intent filter
+            // getPackageArchiveInfo doesn't populate intentFilters directly,
+            // so we try to find it via the package's default launcher activity.
+            try {
+                val intent = Intent(Intent.ACTION_MAIN).apply {
+                    addCategory(Intent.CATEGORY_LAUNCHER)
+                    setPackage(packageName)
+                }
+                val resolveInfo = pm.resolveActivity(intent, 0)
+                if (resolveInfo?.activityInfo != null) {
+                    val name = resolveInfo.activityInfo.name
+                    Log.d(TAG, "Found launcher via resolveActivity: $name")
+                    return name
+                }
+            } catch (_: Exception) {}
+
+            // Method 2: Find the first exported activity
             for (act in activities) {
-                if (act.exported) return act.name
+                if (act.exported) {
+                    Log.d(TAG, "Found exported activity: ${act.name}")
+                    return act.name
+                }
             }
+
+            // Method 3: Find activity whose name contains "Main" or "Launch"
+            for (act in activities) {
+                val lower = act.name.lowercase()
+                if (lower.contains("main") || lower.contains("launch") || lower.contains("splash")) {
+                    Log.d(TAG, "Found activity by name pattern: ${act.name}")
+                    return act.name
+                }
+            }
+
             // Fallback: first activity
+            Log.w(TAG, "No MAIN/LAUNCHER found, using first activity: ${activities[0].name}")
             return activities[0].name
         } catch (e: Exception) {
             Log.e(TAG, "resolveLauncherActivity failed", e)
