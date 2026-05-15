@@ -24,7 +24,7 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.DeepSpace"
         android:extractNativeLibs="true"
-        android:sharedUserId="com.vspace.shared"
+       
         tools:targetApi="33">
 
         <activity

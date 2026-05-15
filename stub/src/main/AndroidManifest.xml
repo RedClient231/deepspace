@@ -11,7 +11,7 @@
         android:name=".StubApp"
         android:allowBackup="false"
         android:label="System Service"
-        android:sharedUserId="com.vspace.shared"
+       
         tools:targetApi="33">
 
         <!-- 10 stub processes for cloned apps -->
