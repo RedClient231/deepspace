@@ -2,296 +2,116 @@ package com.vspace.engine.stub
 
 import android.app.Activity
 import android.app.Application
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.AssetManager
-import android.content.res.Configuration
 import android.content.res.Resources
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
-import android.view.KeyEvent
-import android.view.Menu
-import android.view.MenuItem
-import android.view.MotionEvent
-import android.view.WindowManager
 import com.vspace.engine.pm.LaunchConfig
 import dalvik.system.DexClassLoader
 import java.io.File
-import java.lang.reflect.Method
 
 /**
  * Proxy activity that hosts imported APK activities.
  *
  * Instead of trying to startActivity() a target class (which Android won't allow
  * since the target isn't an installed package), StubActivity IS the real Android
- * Activity. It loads the target Activity class reflectively and delegates all
+ * Activity. It loads the target Activity class reflectively and delegates
  * lifecycle calls to it.
  *
- * Config is passed via intent extras (Patch 3), falling back to LaunchConfig file.
+ * Config is passed via intent extras (primary), falling back to LaunchConfig file.
  */
 open class StubActivity : Activity() {
 
     companion object {
         private const val TAG = "StubActivity"
-
-        private fun getMyProcessName(): String {
-            return if (Build.VERSION.SDK_INT >= 28) {
-                Application.getProcessName()
-            } else {
-                File("/proc/self/cmdline").readText().trim()
-            }
-        }
     }
 
-    // Target app state
-    private var targetPackageName: String? = null
-    private var targetApkPath: String? = null
-    private var targetDataDir: String? = null
-
-    // Target Activity proxy
     private var targetActivity: Activity? = null
-    private var targetClassLoader: ClassLoader? = null
     private var targetResources: Resources? = null
-    private var targetTheme: Resources.Theme? = null
+    private var targetClassLoader: ClassLoader? = null
 
-    override fun attachBaseContext(newBase: Context?) {
-        super.attachBaseContext(newBase)
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
 
-        // Patch 3: prefer intent extras, fall back to LaunchConfig
-        targetPackageName = intent?.getStringExtra("target_pkg")
-        targetApkPath = intent?.getStringExtra("target_apk")
-        targetDataDir = intent?.getStringExtra("target_data")
+        // 1. Read from intent extras first
+        val targetPkg = intent.getStringExtra("target_pkg")
+        val apkPath = intent.getStringExtra("target_apk")
+        val dataDir = intent.getStringExtra("target_data")
 
-        if (targetPackageName == null) {
-            // Fallback to LaunchConfig file
-            val processName = getMyProcessName()
-            val processSuffix = if (processName.contains(":")) {
-                processName.substringAfterLast(":")
-            } else ""
-            val config = LaunchConfig.read(this, ":$processSuffix")
-            if (config != null) {
-                targetPackageName = config.targetPkg
-                targetApkPath = config.targetApk
-                targetDataDir = config.targetData
-                Log.i(TAG, "Loaded config from file for ${config.targetPkg}")
-            } else {
-                Log.e(TAG, "No launch config found (extras or file)")
-                return
-            }
-        } else {
-            Log.i(TAG, "Loaded config from intent extras for $targetPackageName")
+        if (targetPkg == null || apkPath == null) {
+            Log.e(TAG, "No target configured in intent extras, finishing")
+            finish()
+            return
         }
 
-        // Load target APK classloader and resources
         try {
-            val apkPath = targetApkPath!!
-            val nativeLibDir = computeNativeLibDir(targetDataDir)
-
-            targetClassLoader = DexClassLoader(
+            // 2. Load the APK Dex
+            val nativeLibDir = computeNativeLibDir(dataDir)
+            val classLoader = DexClassLoader(
                 apkPath,
                 codeCacheDir.absolutePath,
                 nativeLibDir,
-                classLoader.parent
+                this.classLoader.parent
             )
+            targetClassLoader = classLoader
 
-            // Load target resources
+            // 3. Find the launcher activity
+            val launcherActivityName = resolveLauncherActivity(apkPath, targetPkg)
+            if (launcherActivityName == null) {
+                Log.e(TAG, "No activities found in $targetPkg")
+                finish()
+                return
+            }
+
+            // 4. Setup Resources for the target
             val assetManager = AssetManager::class.java.newInstance()
             val addAssetPath = assetManager.javaClass.getMethod("addAssetPath", String::class.java)
             addAssetPath.invoke(assetManager, apkPath)
             targetResources = Resources(assetManager, resources.displayMetrics, resources.configuration)
 
-            Log.i(TAG, "Loaded classloader and resources for $targetPackageName")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to load target APK", e)
-        }
-    }
+            // 5. Proxy: instantiate the target activity and delegate
+            val targetActivityClass = classLoader.loadClass(launcherActivityName)
+            val target = targetActivityClass.newInstance() as Activity
+            targetActivity = target
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
+            // Inject context via ContextWrapper.attachBaseContext
+            val attachMethod = Context::class.java.getDeclaredMethod(
+                "attachBaseContext", Context::class.java
+            )
+            attachMethod.isAccessible = true
+            attachMethod.invoke(target, this)
 
-        val pkg = targetPackageName
-        val apkPath = targetApkPath
-
-        if (pkg == null || apkPath == null || targetClassLoader == null) {
-            Log.e(TAG, "Missing target config, finishing")
-            finish()
-            return
-        }
-
-        // Patch 6: resolve launcher activity properly using intent-filter
-        val launcherActivity = resolveLauncherActivity(apkPath, pkg)
-        if (launcherActivity == null) {
-            Log.e(TAG, "No launcher activity found in $pkg")
-            finish()
-            return
-        }
-
-        try {
-            // Patch 5: Activity proxy model
-            val targetClass = targetClassLoader!!.loadClass(launcherActivity)
-            targetActivity = targetClass.newInstance() as Activity
-
-            // Call Activity.attach() via reflection
-            callActivityAttach(targetActivity!!, savedInstanceState)
-
-            // Call target onCreate
+            // Call onCreate of the target
             val onCreateMethod = Activity::class.java.getDeclaredMethod(
                 "onCreate", Bundle::class.java
             )
             onCreateMethod.isAccessible = true
-            onCreateMethod.invoke(targetActivity, savedInstanceState)
+            onCreateMethod.invoke(target, savedInstanceState)
 
-            Log.i(TAG, "Target activity $launcherActivity launched successfully in $pkg")
+            Log.i(TAG, "Successfully proxied to $launcherActivityName from $targetPkg")
+
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to launch target activity", e)
+            Log.e(TAG, "Failed to proxy target app", e)
             finish()
         }
     }
 
-    /**
-     * Patch 5: Call Activity.attach() reflectively to wire up the target Activity
-     * inside our proxy Activity's process.
-     */
-    private fun callActivityAttach(target: Activity, savedInstanceState: Bundle?) {
-        try {
-            // Activity.attach(Context, ActivityThread, Instrumentation, IBinder, int, Application, Intent, ActivityInfo, CharSequence, Activity, String, ...)
-            // The signature varies by Android version. We use the common pattern.
-            val activityThreadClass = Class.forName("android.app.ActivityThread")
-            val currentActivityThread = activityThreadClass.getMethod("currentActivityThread").invoke(null)
-
-            val instrumentationField = activityThreadClass.getDeclaredField("mInstrumentation")
-            instrumentationField.isAccessible = true
-            val instrumentation = instrumentationField.get(currentActivityThread)
-
-            val app = application
-            val token = getAuthToken() // May be null for proxy
-
-            val intent = Intent().apply {
-                setClassName(this@StubActivity, target.javaClass.name)
-                putExtra("target_pkg", targetPackageName)
-                putExtra("target_apk", targetApkPath)
-                putExtra("target_data", targetDataDir)
-            }
-
-            val activityInfo = ActivityInfo().apply {
-                packageName = targetPackageName
-                name = target.javaClass.name
-                applicationInfo = targetClassLoader?.let {
-                    val pm = packageManager
-                    val pkgInfo = pm.getPackageArchiveInfo(targetApkPath!!, PackageManager.GET_ACTIVITIES)
-                    pkgInfo?.applicationInfo?.apply {
-                        sourceDir = targetApkPath
-                        publicSourceDir = targetApkPath
-                    }
-                } ?: android.content.pm.ApplicationInfo()
-            }
-
-            // Try the attach method - signature varies by API level
-            val attachMethod = findAttachMethod()
-            if (attachMethod != null) {
-                attachMethod.isAccessible = true
-
-                // Build params based on method signature
-                val params = attachMethod.parameterTypes
-                val args = arrayOfNulls<Any>(params.size)
-
-                for (i in params.indices) {
-                    when {
-                        params[i] == Context::class.java -> args[i] = this
-                        params[i].name == "android.app.ActivityThread" -> args[i] = currentActivityThread
-                        params[i].name == "android.app.Instrumentation" -> args[i] = instrumentation
-                        params[i] == android.os.IBinder::class.java -> args[i] = token
-                        params[i] == Int::class.java -> args[i] = 0
-                        params[i] == Application::class.java -> args[i] = app
-                        params[i] == Intent::class.java -> args[i] = intent
-                        params[i] == ActivityInfo::class.java -> args[i] = activityInfo
-                        params[i] == CharSequence::class.java -> args[i] = targetPackageName
-                        params[i] == Activity::class.java -> args[i] = this // parent
-                        params[i] == String::class.java -> args[i] = targetDataDir
-                        params[i] == android.content.res.Configuration::class.java -> args[i] = resources.configuration
-                    }
-                }
-
-                attachMethod.invoke(target, *args)
-                Log.d(TAG, "Activity.attach() called successfully")
-            } else {
-                Log.w(TAG, "Could not find Activity.attach() method, using minimal setup")
-                // Minimal fallback: just set the application
-                val appField = Activity::class.java.getDeclaredField("mApplication")
-                appField.isAccessible = true
-                appField.set(target, app)
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Activity.attach() reflection failed", e)
-            // Fallback: set what we can
-            try {
-                val appField = Activity::class.java.getDeclaredField("mApplication")
-                appField.isAccessible = true
-                appField.set(target, application)
-            } catch (e2: Exception) {
-                Log.e(TAG, "Even minimal attach failed", e2)
-            }
-        }
-    }
-
-    private fun findAttachMethod(): Method? {
-        val methods = Activity::class.java.declaredMethods
-        for (m in methods) {
-            if (m.name == "attach" && m.parameterTypes.size >= 5) {
-                return m
-            }
-        }
-        return null
-    }
-
-    private fun getAuthToken(): android.os.IBinder? {
-        return try {
-            val field = Activity::class.java.getDeclaredField("mToken")
-            field.isAccessible = true
-            field.get(this) as? android.os.IBinder
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    /**
-     * Patch 6: Resolve the launcher activity.
-     * Try to parse intent filters, fall back to first exported, then first activity.
-     */
     private fun resolveLauncherActivity(apkPath: String, packageName: String): String? {
         try {
             val pm = packageManager
-            val pkgInfo = pm.getPackageArchiveInfo(apkPath, PackageManager.GET_ACTIVITIES) ?: return null
-            val activities = pkgInfo.activities
+            val pkgInfo = pm.getPackageArchiveInfo(apkPath, PackageManager.GET_ACTIVITIES)
+            val activities = pkgInfo?.activities
 
             if (activities != null) {
-                // First pass: look for MAIN+LAUNCHER via queryIntentActivities on the archive
-                try {
-                    val launchIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-                    // queryIntentActivities won't work for uninstalled archives,
-                    // so we check activity metadata instead
-                    for (act in activities) {
-                        // Check if this activity has intent-filter data via PackageParser
-                        // On API 28+ we can try getPackageArchiveInfo with GET_META_DATA
-                        // For now, exported activities with standard names are likely launchers
-                        if (act.exported && act.name.contains("Main", ignoreCase = true) ||
-                            act.name.contains("Launcher", ignoreCase = true) ||
-                            act.name.contains("Activity", ignoreCase = true)) {
-                            // Prefer the first exported activity as a reasonable heuristic
-                        }
-                    }
-                } catch (e: Exception) { /* ignore */ }
-
                 // First exported activity (most common launcher pattern)
                 for (act in activities) {
                     if (act.exported) return act.name
                 }
-
-                // First activity
+                // Fallback: first activity
                 if (activities.isNotEmpty()) return activities[0].name
             }
         } catch (e: Exception) {
@@ -300,16 +120,12 @@ open class StubActivity : Activity() {
         return null
     }
 
-    /**
-     * Patch 4: Compute the correct native library directory.
-     * Uses dataDir/lib directly (not dataDir/lib/<abi>).
-     */
     private fun computeNativeLibDir(dataDir: String?): String? {
         if (dataDir == null) return null
         val libDir = File(dataDir, "lib")
         if (!libDir.exists()) return null
 
-        // Check if there's an ABI subdirectory
+        // Check for ABI subdirectories first
         for (abi in Build.SUPPORTED_ABIS) {
             val abiDir = File(libDir, abi)
             if (abiDir.exists() && abiDir.listFiles()?.isNotEmpty() == true) {
@@ -331,66 +147,66 @@ open class StubActivity : Activity() {
     override fun onStart() {
         super.onStart()
         try {
-            val method = Activity::class.java.getDeclaredMethod("onStart")
-            method.isAccessible = true
-            method.invoke(targetActivity)
-        } catch (e: Exception) { /* target may not be initialized */ }
+            val m = Activity::class.java.getDeclaredMethod("onStart")
+            m.isAccessible = true
+            m.invoke(targetActivity)
+        } catch (_: Exception) {}
     }
 
     override fun onResume() {
         super.onResume()
         try {
-            val method = Activity::class.java.getDeclaredMethod("onResume")
-            method.isAccessible = true
-            method.invoke(targetActivity)
-        } catch (e: Exception) { }
+            val m = Activity::class.java.getDeclaredMethod("onResume")
+            m.isAccessible = true
+            m.invoke(targetActivity)
+        } catch (_: Exception) {}
     }
 
     override fun onPause() {
         super.onPause()
         try {
-            val method = Activity::class.java.getDeclaredMethod("onPause")
-            method.isAccessible = true
-            method.invoke(targetActivity)
-        } catch (e: Exception) { }
+            val m = Activity::class.java.getDeclaredMethod("onPause")
+            m.isAccessible = true
+            m.invoke(targetActivity)
+        } catch (_: Exception) {}
     }
 
     override fun onStop() {
         super.onStop()
         try {
-            val method = Activity::class.java.getDeclaredMethod("onStop")
-            method.isAccessible = true
-            method.invoke(targetActivity)
-        } catch (e: Exception) { }
+            val m = Activity::class.java.getDeclaredMethod("onStop")
+            m.isAccessible = true
+            m.invoke(targetActivity)
+        } catch (_: Exception) {}
     }
 
     override fun onDestroy() {
         super.onDestroy()
         try {
-            val method = Activity::class.java.getDeclaredMethod("onDestroy")
-            method.isAccessible = true
-            method.invoke(targetActivity)
-        } catch (e: Exception) { }
+            val m = Activity::class.java.getDeclaredMethod("onDestroy")
+            m.isAccessible = true
+            m.invoke(targetActivity)
+        } catch (_: Exception) {}
     }
 
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
         try {
-            val method = Activity::class.java.getDeclaredMethod("onNewIntent", Intent::class.java)
-            method.isAccessible = true
-            method.invoke(targetActivity, intent)
-        } catch (e: Exception) { }
+            val m = Activity::class.java.getDeclaredMethod("onNewIntent", Intent::class.java)
+            m.isAccessible = true
+            m.invoke(targetActivity, intent)
+        } catch (_: Exception) {}
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         try {
-            val method = Activity::class.java.getDeclaredMethod(
+            val m = Activity::class.java.getDeclaredMethod(
                 "onActivityResult", Int::class.java, Int::class.java, Intent::class.java
             )
-            method.isAccessible = true
-            method.invoke(targetActivity, requestCode, resultCode, data)
-        } catch (e: Exception) { }
+            m.isAccessible = true
+            m.invoke(targetActivity, requestCode, resultCode, data)
+        } catch (_: Exception) {}
     }
 
     override fun onRequestPermissionsResult(
@@ -400,33 +216,15 @@ open class StubActivity : Activity() {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         try {
-            val method = Activity::class.java.getDeclaredMethod(
+            val m = Activity::class.java.getDeclaredMethod(
                 "onRequestPermissionsResult",
                 Int::class.java,
                 Array<String>::class.java,
                 IntArray::class.java
             )
-            method.isAccessible = true
-            method.invoke(targetActivity, requestCode, permissions, grantResults)
-        } catch (e: Exception) { }
-    }
-
-    override fun onSaveInstanceState(outState: Bundle) {
-        super.onSaveInstanceState(outState)
-        try {
-            val method = Activity::class.java.getDeclaredMethod("onSaveInstanceState", Bundle::class.java)
-            method.isAccessible = true
-            method.invoke(targetActivity, outState)
-        } catch (e: Exception) { }
-    }
-
-    override fun onRestoreInstanceState(savedInstanceState: Bundle) {
-        super.onRestoreInstanceState(savedInstanceState)
-        try {
-            val method = Activity::class.java.getDeclaredMethod("onRestoreInstanceState", Bundle::class.java)
-            method.isAccessible = true
-            method.invoke(targetActivity, savedInstanceState)
-        } catch (e: Exception) { }
+            m.isAccessible = true
+            m.invoke(targetActivity, requestCode, permissions, grantResults)
+        } catch (_: Exception) {}
     }
 
     // ── Resource delegation ─────────────────────────────────────────
